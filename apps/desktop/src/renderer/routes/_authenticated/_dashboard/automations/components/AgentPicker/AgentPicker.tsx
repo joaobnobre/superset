@@ -77,6 +77,7 @@ export function AgentPicker({
 					return (
 						<DropdownMenuItem
 							key={agent.id}
+							disabled={agent.disabled}
 							onSelect={() => onChange(portableAgentValue(agents, agent))}
 						>
 							{icon ? (

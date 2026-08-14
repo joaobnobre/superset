@@ -238,6 +238,110 @@ describe("buildTerminalAgentLaunch", () => {
 		);
 	});
 
+	it("forwards Claude Code fast mode as an escaped settings override", () => {
+		const db = createTestDb();
+		seedConfig(db);
+		const launch = buildTerminalAgentLaunch(db, {
+			workspaceId: "11111111-1111-1111-1111-111111111111",
+			agent: "claude",
+			prompt: "do the thing",
+			model: "claude-opus-5",
+			speed: "fast",
+		});
+		expect(launch.fullCommand).toBe(
+			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--model' 'claude-opus-5' '--settings' '{\"fastMode\":true}' 'do the thing'",
+		);
+	});
+
+	it("keeps OpenCode reasoning variants independent from agent modes", () => {
+		const db = createTestDb();
+		db.insert(schema.hostAgentConfigs)
+			.values({
+				id: "00000000-0000-0000-0000-00000000000b",
+				presetId: "opencode",
+				label: "OpenCode",
+				command: "opencode",
+				argsJson: "[]",
+				promptTransport: "argv",
+				promptArgsJson: "[]",
+				resumeArgsJson: "[]",
+				envJson: "{}",
+				displayOrder: 0,
+			})
+			.run();
+		const launch = buildTerminalAgentLaunch(db, {
+			workspaceId: "11111111-1111-1111-1111-111111111111",
+			agent: "opencode",
+			prompt: "do the thing",
+			model: "openai/gpt-5.6-sol",
+			effort: "high",
+			mode: "plan",
+		});
+		expect(launch.fullCommand).toBe(
+			"'opencode' '--model' 'openai/gpt-5.6-sol' '--variant' 'high' '--agent' 'plan' 'do the thing'",
+		);
+	});
+
+	it("combines Claude Code Fast Mode and Ultracode settings", () => {
+		const db = createTestDb();
+		seedConfig(db);
+		const launch = buildTerminalAgentLaunch(db, {
+			workspaceId: "11111111-1111-1111-1111-111111111111",
+			agent: "claude",
+			prompt: "do the thing",
+			model: "claude-opus-5",
+			effort: "ultracode",
+			speed: "fast",
+		});
+		expect(launch.fullCommand).toBe(
+			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--model' 'claude-opus-5' '--effort' 'xhigh' '--settings' '{\"fastMode\":true,\"ultracode\":true}' 'do the thing'",
+		);
+	});
+
+	it("leaves Claude Code's one-turn ultrathink keyword in the user's prompt", () => {
+		const db = createTestDb();
+		seedConfig(db);
+		const launch = buildTerminalAgentLaunch(db, {
+			workspaceId: "11111111-1111-1111-1111-111111111111",
+			agent: "claude",
+			prompt: "ultrathink about this change",
+			model: "claude-opus-5",
+		});
+		expect(launch.fullCommand).toBe(
+			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--model' 'claude-opus-5' 'ultrathink about this change'",
+		);
+	});
+
+	it("forwards Claude Haiku Thinking as a settings override", () => {
+		const db = createTestDb();
+		seedConfig(db);
+		const launch = buildTerminalAgentLaunch(db, {
+			workspaceId: "11111111-1111-1111-1111-111111111111",
+			agent: "claude",
+			prompt: "do the thing",
+			model: "claude-haiku-4-5",
+			effort: "on",
+		});
+		expect(launch.fullCommand).toBe(
+			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--model' 'claude-haiku-4-5' '--settings' '{\"alwaysThinkingEnabled\":true}' 'do the thing'",
+		);
+	});
+
+	it("forwards a supported Claude Code context window in the model id", () => {
+		const db = createTestDb();
+		seedConfig(db);
+		const launch = buildTerminalAgentLaunch(db, {
+			workspaceId: "11111111-1111-1111-1111-111111111111",
+			agent: "claude",
+			prompt: "do the thing",
+			model: "claude-opus-5",
+			contextWindow: "1m",
+		});
+		expect(launch.fullCommand).toBe(
+			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--model' 'claude-opus-5[1m]' 'do the thing'",
+		);
+	});
+
 	it("resumes a previous session with an empty prompt", () => {
 		const db = createTestDb();
 		seedConfig(db);
@@ -298,19 +402,19 @@ describe("validateAgentEffortSelection", () => {
 
 	it("accepts a supported effort for the selected agent", () => {
 		expect(() =>
-			validateAgentEffortSelection("codex", "Codex", "xhigh"),
+			validateAgentEffortSelection("codex", "Codex", "xhigh", "gpt-5.6-sol"),
 		).not.toThrow();
 	});
 
 	it("rejects an invalid effort with the supported values", () => {
 		try {
-			validateAgentEffortSelection("codex", "Codex", "max");
+			validateAgentEffortSelection("codex", "Codex", "extreme", "gpt-5.6-sol");
 			throw new Error("Expected validation to fail");
 		} catch (error) {
 			expect(error).toBeInstanceOf(TRPCError);
 			expect((error as TRPCError).code).toBe("BAD_REQUEST");
 			expect((error as Error).message).toBe(
-				'Unsupported reasoning effort "max" for Codex. Choose one of: low, medium, high, xhigh.',
+				'Unsupported reasoning effort "extreme" for Codex. Choose one of: low, medium, high, xhigh, max, ultra.',
 			);
 		}
 	});

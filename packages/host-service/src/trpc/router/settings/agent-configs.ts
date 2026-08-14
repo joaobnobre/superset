@@ -8,6 +8,10 @@ import {
 import { TRPCError } from "@trpc/server";
 import { asc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
+import {
+	type AgentCapabilitySnapshot,
+	inspectAgentCapability,
+} from "../../../agent-capabilities/agent-capabilities";
 import type { HostDb } from "../../../db";
 import { hostAgentConfigs } from "../../../db/schema";
 import { protectedProcedure, router } from "../../index";
@@ -189,6 +193,40 @@ export const agentConfigsRouter = router({
 	list: protectedProcedure.query(({ ctx }) => {
 		const rows = seedDefaultsIfEmpty(ctx.db);
 		return rows.map(toOutput);
+	}),
+
+	/**
+	 * Host-authoritative availability and model snapshot. Every configured
+	 * agent is probed independently so one slow or broken CLI cannot suppress
+	 * the providers that are ready.
+	 */
+	capabilities: protectedProcedure.query(async ({ ctx }) => {
+		const configs = seedDefaultsIfEmpty(ctx.db).map(toOutput);
+		return Promise.all(
+			configs.map(async (config): Promise<AgentCapabilitySnapshot> => {
+				try {
+					return await inspectAgentCapability({
+						id: config.id,
+						presetId: config.presetId,
+						command: config.command,
+						env: config.env,
+					});
+				} catch {
+					return {
+						agentId: config.id,
+						presetId: config.presetId,
+						status: "unavailable",
+						installed: false,
+						auth: "unknown",
+						version: null,
+						modelSource: "none",
+						models: [],
+						message: "Agent capability probe failed",
+						checkedAt: new Date().toISOString(),
+					};
+				}
+			}),
+		);
 	}),
 
 	/**

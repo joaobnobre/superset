@@ -6,6 +6,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@superset/ui/select";
+import { cn } from "@superset/ui/utils";
 import { useNavigate } from "@tanstack/react-router";
 import {
 	getPresetIcon,
@@ -20,6 +21,7 @@ export interface AgentSelectAgent {
 	id: string;
 	label: string;
 	iconId?: string;
+	disabled?: boolean;
 	/** Host preset slug ("claude", "custom", …) — stable across hosts and DB re-seeds, unlike `id`. */
 	presetId?: string;
 }
@@ -55,7 +57,9 @@ export function AgentSelect<T extends string>({
 }: AgentSelectProps<T>) {
 	const navigate = useNavigate();
 	const isDark = useIsDarkTheme();
-	const selectableIds = new Set<string>(agents.map((agent) => agent.id));
+	const selectableIds = new Set<string>(
+		agents.filter((agent) => !agent.disabled).map((agent) => agent.id),
+	);
 	const selectedValue =
 		value != null &&
 		((allowNone && value === noneValue) || selectableIds.has(value))
@@ -75,23 +79,37 @@ export function AgentSelect<T extends string>({
 
 	return (
 		<Select
-			value={selectedValue}
+			value={selectedValue ?? ""}
 			onValueChange={handleValueChange}
 			disabled={disabled}
 		>
 			<SelectTrigger className={triggerClassName}>
 				<SelectValue placeholder={placeholder} />
 			</SelectTrigger>
-			<SelectContent className={contentClassName}>
+			<SelectContent className={contentClassName} collisionPadding={48}>
 				{allowNone && noneValue != null && (
 					<SelectItem value={noneValue}>{noneLabel}</SelectItem>
 				)}
 				{agents.map((agent) => {
-					const icon = getPresetIcon(agent.iconId ?? agent.id, isDark);
+					const iconId = agent.iconId ?? agent.id;
+					const icon = getPresetIcon(iconId, isDark);
 					return (
-						<SelectItem key={agent.id} value={agent.id}>
+						<SelectItem
+							key={agent.id}
+							value={agent.id}
+							disabled={agent.disabled}
+						>
 							<span className="flex items-center gap-2">
-								{icon && <img src={icon} alt="" className={iconClassName} />}
+								{icon && (
+									<img
+										src={icon}
+										alt=""
+										className={cn(
+											iconClassName,
+											iconId === "codex" && "scale-[1.35]",
+										)}
+									/>
+								)}
 								{agent.label}
 							</span>
 						</SelectItem>
