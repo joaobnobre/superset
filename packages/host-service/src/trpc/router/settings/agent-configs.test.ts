@@ -47,6 +47,13 @@ const DEFAULT_PRESET_ORDERS = DEFAULT_PRESET_IDS.map((_, i) => i);
 
 describe("agentConfigsRouter", () => {
 	describe("list()", () => {
+		it("seeds bundled defaults alphabetically", () => {
+			const labels = getDefaultSeedPresets().map((preset) => preset.label);
+			expect(labels).toEqual(
+				[...labels].sort((left, right) => left.localeCompare(right)),
+			);
+		});
+
 		it("seeds bundled defaults on first call", async () => {
 			const caller = createCaller();
 

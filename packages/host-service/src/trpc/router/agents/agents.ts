@@ -1,7 +1,9 @@
 import {
 	buildAgentEffortArgs,
+	buildAgentModeArgs,
 	buildAgentModelArgs,
 	buildAgentModelEnv,
+	buildAgentRuntimeTraitArgs,
 	getAgentEffortSupport,
 } from "@superset/shared/agent-models";
 import {
@@ -13,6 +15,7 @@ import {
 import { TRPCError } from "@trpc/server";
 import { asc, eq } from "drizzle-orm";
 import { z } from "zod";
+import { getCachedAgentCapability } from "../../../agent-capabilities/agent-capabilities";
 import type { HostDb } from "../../../db";
 import { hostAgentConfigs, workspaces } from "../../../db/schema";
 import { createTerminalSessionInternal } from "../../../terminal/terminal";
@@ -176,6 +179,9 @@ export interface AgentRunInput {
 	attachmentIds?: string[];
 	model?: string;
 	effort?: string;
+	mode?: string;
+	speed?: string;
+	contextWindow?: string;
 	/** Session id of a previous run of this agent to restore (e.g. a killed
 	 * session's `agentSessionId`). The prompt may be empty when resuming. */
 	resumeSessionId?: string;
@@ -195,10 +201,11 @@ export function validateAgentEffortSelection(
 	presetId: string,
 	label: string,
 	effort: string | undefined,
+	model?: string,
 ): void {
 	if (!effort) return;
 
-	const support = getAgentEffortSupport(presetId);
+	const support = getAgentEffortSupport(presetId, model);
 	if (!support) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",
@@ -246,9 +253,18 @@ export function validateAgentResumeSelection(
  */
 export function validateAgentLaunchEffort(
 	db: HostDb,
-	input: Pick<AgentRunInput, "agent" | "effort">,
+	input: Pick<AgentRunInput, "agent" | "effort" | "model">,
 ): void {
 	if (!input.effort) return;
+	if (input.agent === SUPERSET_AGENT_ID) {
+		validateAgentEffortSelection(
+			SUPERSET_AGENT_ID,
+			SUPERSET_AGENT_LABEL,
+			input.effort,
+			input.model,
+		);
+		return;
+	}
 
 	const config = resolveHostAgentConfig(db, input.agent);
 	if (!config) {
@@ -257,7 +273,12 @@ export function validateAgentLaunchEffort(
 			message: `No host agent config matching '${input.agent}' (tried instance id then preset id).`,
 		});
 	}
-	validateAgentEffortSelection(config.presetId, config.label, input.effort);
+	validateAgentEffortSelection(
+		config.presetId,
+		config.label,
+		input.effort,
+		input.model,
+	);
 }
 
 /**
@@ -280,8 +301,22 @@ export function buildTerminalAgentLaunch(
 			message: `No host agent config matching '${input.agent}' — the agent may have been removed or this host's agents were reset. Re-select an agent (or use a preset id like "claude").`,
 		});
 	}
-	validateAgentEffortSelection(config.presetId, config.label, input.effort);
+	validateAgentEffortSelection(
+		config.presetId,
+		config.label,
+		input.effort,
+		input.model,
+	);
 	validateAgentResumeSelection(config, input.resumeSessionId);
+	const capability = getCachedAgentCapability({
+		id: config.id,
+		presetId: config.presetId,
+		command: config.command,
+		env: config.env,
+	});
+	const runtimeModel = capability?.models.find(
+		(model) => model.id === input.model,
+	);
 
 	const resolvedAttachments: Array<{ attachmentId: string; path: string }> = [];
 	for (const attachmentId of input.attachmentIds ?? []) {
@@ -296,12 +331,35 @@ export function buildTerminalAgentLaunch(
 	}
 
 	const prompt = buildAttachmentBlock(input.prompt, resolvedAttachments);
-	const modelArgs = buildAgentModelArgs(config.presetId, input.model);
-	const effortArgs = buildAgentEffortArgs(config.presetId, input.effort);
+	const modelArgs = buildAgentModelArgs(
+		config.presetId,
+		input.model,
+		input.contextWindow,
+		capability?.modelSource === "runtime"
+			? capability.models.map((model) => model.id)
+			: undefined,
+	);
+	const effortArgs = buildAgentEffortArgs(
+		config.presetId,
+		input.effort,
+		input.model,
+		runtimeModel?.efforts
+			? {
+					defaultEffortId: runtimeModel.defaultEffortId,
+					efforts: runtimeModel.efforts,
+				}
+			: undefined,
+	);
+	const runtimeTraitArgs = buildAgentRuntimeTraitArgs(config.presetId, {
+		model: input.model,
+		effort: input.effort,
+		speed: input.speed,
+	});
+	const modeArgs = buildAgentModeArgs(config.presetId, input.mode);
 	const command = buildAgentCommandString(
 		config,
 		prompt,
-		[...modelArgs, ...effortArgs],
+		[...modelArgs, ...effortArgs, ...modeArgs, ...runtimeTraitArgs],
 		{ resumeSessionId: input.resumeSessionId },
 	);
 	const modelEnv = buildAgentModelEnv(config.presetId, input.model);
@@ -367,6 +425,9 @@ export const agentsRouter = router({
 				attachmentIds: z.array(z.string().uuid()).optional(),
 				model: z.string().min(1).optional(),
 				effort: z.string().min(1).optional(),
+				mode: z.string().min(1).optional(),
+				speed: z.string().min(1).optional(),
+				contextWindow: z.string().min(1).optional(),
 				resumeSessionId: z.string().min(1).optional(),
 			}),
 		)

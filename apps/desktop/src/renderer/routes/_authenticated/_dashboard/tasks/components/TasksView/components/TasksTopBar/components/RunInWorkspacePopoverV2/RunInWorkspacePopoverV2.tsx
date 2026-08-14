@@ -114,7 +114,10 @@ export function RunInWorkspacePopoverV2({
 	const { agents: v2Agents, isFetched: v2AgentsFetched } =
 		useV2AgentChoices(launchHostUrl);
 	const validAgentIds = useMemo(
-		() => new Set(v2Agents.map((agent) => agent.id)),
+		() =>
+			new Set(
+				v2Agents.filter((agent) => !agent.disabled).map((agent) => agent.id),
+			),
 		[v2Agents],
 	);
 

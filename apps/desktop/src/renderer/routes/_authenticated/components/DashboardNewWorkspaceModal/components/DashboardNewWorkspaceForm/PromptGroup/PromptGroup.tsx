@@ -1,6 +1,10 @@
 import {
+	AGENT_EFFORT_SUPPORT,
+	getAgentContextWindowSupport,
 	getAgentEffortSupport,
 	getAgentModelSupport,
+	getAgentModeSupport,
+	getAgentSpeedSupport,
 } from "@superset/shared/agent-models";
 import { sanitizeUserBranchName } from "@superset/shared/workspace-launch";
 import {
@@ -30,9 +34,12 @@ import { IssueLinkCommand } from "renderer/components/IssueLinkCommand";
 import { LinkedIssuePill } from "renderer/components/LinkedIssuePill";
 import { MarkdownEditor } from "renderer/components/MarkdownEditor";
 import { resolveHostUrl } from "renderer/hooks/host-service/useHostTargetUrl";
+import { useAgentContextWindowPreference } from "renderer/hooks/useAgentContextWindowPreference";
 import { useAgentEffortPreference } from "renderer/hooks/useAgentEffortPreference";
 import { useAgentLaunchPreferences } from "renderer/hooks/useAgentLaunchPreferences";
 import { useAgentModelPreference } from "renderer/hooks/useAgentModelPreference";
+import { useAgentModePreference } from "renderer/hooks/useAgentModePreference";
+import { useAgentSpeedPreference } from "renderer/hooks/useAgentSpeedPreference";
 import { useRelayUrl } from "renderer/hooks/useRelayUrl";
 import { useV2AgentChoices } from "renderer/hooks/useV2AgentChoices";
 import { PLATFORM } from "renderer/hotkeys";
@@ -54,6 +61,7 @@ import { PRLinkCommand } from "./components/PRLinkCommand";
 import { ProjectPickerPill } from "./components/ProjectPickerPill";
 import { PromptHistoryCommand } from "./components/PromptHistoryCommand";
 import { UploadingAttachmentPill } from "./components/UploadingAttachmentPill";
+import { WorkspaceAgentTraitsPicker } from "./components/WorkspaceAgentTraitsPicker";
 import { useBranchPickerController } from "./hooks/useBranchPickerController";
 import { useLinkedContext } from "./hooks/useLinkedContext";
 import { useSubmitWorkspace } from "./hooks/useSubmitWorkspace";
@@ -63,10 +71,13 @@ import {
 } from "./hooks/useUploadAttachments";
 import {
 	AGENT_STORAGE_KEY,
+	CONTEXT_WINDOW_STORAGE_KEY,
 	EFFORT_STORAGE_KEY,
+	MODE_TRAIT_STORAGE_KEY,
 	MODEL_STORAGE_KEY,
 	PILL_BUTTON_CLASS,
 	type ProjectOption,
+	SPEED_STORAGE_KEY,
 	type WorkspaceCreateAgent,
 } from "./types";
 
@@ -172,10 +183,13 @@ export function PromptGroup({
 			}) ?? null
 		);
 	}, [draft.hostId, machineId, activeHostUrl, activeOrganizationId, relayUrl]);
-	const { agents: v2Agents, isFetched: v2AgentsFetched } =
-		useV2AgentChoices(launchHostUrl);
+	const {
+		agents: v2Agents,
+		capabilitiesByAgentId,
+		isFetched: v2AgentsFetched,
+	} = useV2AgentChoices(launchHostUrl);
 	const selectableAgentIds = useMemo(
-		() => v2Agents.map((agent) => agent.id),
+		() => v2Agents.filter((agent) => !agent.disabled).map((agent) => agent.id),
 		[v2Agents],
 	);
 	const { selectedAgent, setSelectedAgent } =
@@ -188,41 +202,114 @@ export function PromptGroup({
 		});
 
 	// ── Model picker (per agent preset) ──────────────────────────────
-	// `iconId` carries the presetId for v2 agents ("superset" for chat).
-	const selectedPresetId = useMemo(
-		() => v2Agents.find((agent) => agent.id === selectedAgent)?.iconId ?? null,
-		[v2Agents, selectedAgent],
-	);
-	const modelSupport = selectedPresetId
-		? getAgentModelSupport(selectedPresetId)
-		: undefined;
+	// `presetId` is stable even when a host config uses a custom icon.
+	const selectedPresetId = useMemo(() => {
+		const agent = v2Agents.find((candidate) => candidate.id === selectedAgent);
+		return agent?.presetId ?? agent?.iconId ?? null;
+	}, [v2Agents, selectedAgent]);
+	const selectedCapability = capabilitiesByAgentId.get(selectedAgent);
+	const modelSupport = useMemo(() => {
+		if (!selectedPresetId) return undefined;
+		const support = getAgentModelSupport(selectedPresetId);
+		if (!support || !selectedCapability?.models.length) return support;
+		const runtimeDefault = selectedCapability.models.some(
+			(model) => model.id === support.defaultModelId,
+		)
+			? support.defaultModelId
+			: selectedCapability.models[0]?.id;
+		return {
+			...support,
+			defaultModelId: runtimeDefault,
+			models: selectedCapability.models.map(({ id, label, provider }) => ({
+				id,
+				label,
+				provider,
+			})),
+		};
+	}, [selectedCapability, selectedPresetId]);
 	const { selectedModel, setSelectedModel } = useAgentModelPreference(
 		MODEL_STORAGE_KEY,
 		modelSupport ? selectedPresetId : null,
+		modelSupport,
 	);
-	const effortSupport = selectedPresetId
-		? getAgentEffortSupport(selectedPresetId)
-		: undefined;
+	const resolvedModel =
+		selectedModel ??
+		modelSupport?.defaultModelId ??
+		modelSupport?.models[0]?.id;
+	const effortSupport = useMemo(() => {
+		if (!selectedPresetId) return undefined;
+		const runtimeModel = selectedCapability?.models.find(
+			(model) => model.id === resolvedModel,
+		);
+		if (selectedCapability?.modelSource !== "runtime") {
+			return getAgentEffortSupport(selectedPresetId, resolvedModel);
+		}
+		if (runtimeModel?.efforts === undefined) {
+			return getAgentEffortSupport(selectedPresetId, resolvedModel);
+		}
+		if (runtimeModel.efforts.length === 0) return undefined;
+		const transport = AGENT_EFFORT_SUPPORT.find(
+			(support) => support.presetId === selectedPresetId,
+		);
+		if (!transport) return undefined;
+		return {
+			...transport,
+			defaultEffortId: runtimeModel.defaultEffortId,
+			efforts: runtimeModel.efforts,
+		};
+	}, [resolvedModel, selectedCapability, selectedPresetId]);
 	const { selectedEffort, setSelectedEffort } = useAgentEffortPreference(
 		EFFORT_STORAGE_KEY,
 		effortSupport ? selectedPresetId : null,
+		resolvedModel ?? null,
+		effortSupport,
 	);
+	const modeSupport = selectedPresetId
+		? getAgentModeSupport(selectedPresetId)
+		: undefined;
+	const { selectedMode, setSelectedMode } = useAgentModePreference(
+		MODE_TRAIT_STORAGE_KEY,
+		modeSupport ? selectedPresetId : null,
+	);
+	const speedSupport = selectedPresetId
+		? getAgentSpeedSupport(selectedPresetId, resolvedModel)
+		: undefined;
+	const { selectedSpeed, setSelectedSpeed } = useAgentSpeedPreference(
+		SPEED_STORAGE_KEY,
+		speedSupport ? selectedPresetId : null,
+		resolvedModel ?? null,
+	);
+	const contextWindowSupport = selectedPresetId
+		? getAgentContextWindowSupport(selectedPresetId, resolvedModel)
+		: undefined;
+	const { selectedContextWindow, setSelectedContextWindow } =
+		useAgentContextWindowPreference(
+			CONTEXT_WINDOW_STORAGE_KEY,
+			contextWindowSupport ? selectedPresetId : null,
+			resolvedModel ?? null,
+		);
+	const resolvedEffort = effortSupport?.efforts.some(
+		(option) => option.id === selectedEffort,
+	)
+		? selectedEffort
+		: null;
+	const resolvedSpeed = speedSupport?.speeds.some(
+		(option) => option.id === selectedSpeed,
+	)
+		? selectedSpeed
+		: (speedSupport?.defaultSpeedId ?? null);
+	const resolvedContextWindow = contextWindowSupport?.contextWindows.some(
+		(option) => option.id === selectedContextWindow,
+	)
+		? selectedContextWindow
+		: (contextWindowSupport?.defaultContextWindowId ?? null);
 
-	// Promote the placeholder "none" → first configured agent whenever the
-	// current selection isn't a real agent and the user hasn't explicitly
-	// chosen "none". Fires on initial open (where useState init captured
-	// "none" before the query resolved) AND on host switch (where the
-	// previous host's UUID isn't valid here, so the corrective effect inside
-	// useAgentLaunchPreferences resets to "none"). The corrective effect
-	// can't rescue these on its own because "none" is always in validAgents.
+	// Promote the internal "none" placeholder to the first configured agent.
+	// The create-workspace picker no longer offers a no-agent choice, so stale
+	// preferences from the old UI must not leave the control unselectable.
 	useEffect(() => {
 		if (!v2AgentsFetched) return;
 		if (selectedAgent !== "none") return;
-		const stored =
-			typeof window !== "undefined"
-				? window.localStorage.getItem(AGENT_STORAGE_KEY)
-				: null;
-		if (stored === "none") return;
 		const first = selectableAgentIds[0];
 		if (first) setSelectedAgent(first);
 	}, [v2AgentsFetched, selectableAgentIds, selectedAgent, setSelectedAgent]);
@@ -340,8 +427,11 @@ export function PromptGroup({
 	const createWorkspace = useSubmitWorkspace(
 		projectId,
 		selectedAgent,
-		modelSupport ? selectedModel : null,
-		effortSupport ? selectedEffort : null,
+		modelSupport ? (resolvedModel ?? null) : null,
+		effortSupport ? resolvedEffort : null,
+		modeSupport ? selectedMode : null,
+		speedSupport ? resolvedSpeed : null,
+		contextWindowSupport ? resolvedContextWindow : null,
 		uploadAttachments,
 		promptContext,
 	);
@@ -562,28 +652,41 @@ export function PromptGroup({
 						<AgentSelect<WorkspaceCreateAgent>
 							agents={v2Agents}
 							value={selectedAgent}
-							placeholder="No agent"
+							placeholder={
+								v2AgentsFetched ? "Select agent" : "Loading agents..."
+							}
+							disabled={!v2AgentsFetched}
 							onValueChange={setSelectedAgent}
 							onBeforeConfigureAgents={closeModal}
 							triggerClassName={`${PILL_BUTTON_CLASS} px-1.5 gap-1 text-foreground w-auto max-w-[160px]`}
 							iconClassName="size-3 object-contain"
-							allowNone
-							noneLabel="No agent"
-							noneValue="none"
 						/>
 						{modelSupport && (
 							<AgentModelSelect
 								models={modelSupport.models}
-								value={selectedModel}
+								value={resolvedModel ?? null}
 								onValueChange={setSelectedModel}
+								includeDefault={modelSupport.defaultModelId === undefined}
 								triggerClassName={`${PILL_BUTTON_CLASS} px-1.5 gap-1 text-foreground w-auto max-w-[160px]`}
 							/>
 						)}
-						{effortSupport && (
-							<AgentModelSelect
-								models={effortSupport.efforts}
-								value={selectedEffort}
-								onValueChange={setSelectedEffort}
+						{(effortSupport ||
+							modeSupport ||
+							speedSupport ||
+							contextWindowSupport) && (
+							<WorkspaceAgentTraitsPicker
+								effortSupport={effortSupport}
+								modeSupport={modeSupport}
+								speedSupport={speedSupport}
+								contextWindowSupport={contextWindowSupport}
+								effort={resolvedEffort}
+								mode={selectedMode}
+								speed={resolvedSpeed}
+								contextWindow={resolvedContextWindow}
+								onEffortChange={setSelectedEffort}
+								onModeChange={setSelectedMode}
+								onSpeedChange={setSelectedSpeed}
+								onContextWindowChange={setSelectedContextWindow}
 								triggerClassName={`${PILL_BUTTON_CLASS} px-1.5 gap-1 text-foreground w-auto max-w-[160px]`}
 							/>
 						)}
