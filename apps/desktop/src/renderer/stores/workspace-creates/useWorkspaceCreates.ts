@@ -6,6 +6,7 @@ import { TRPCClientError } from "@trpc/client";
 import { useCallback } from "react";
 import { resolveHostUrl } from "renderer/hooks/host-service/useHostTargetUrl";
 import { useRelayUrl } from "renderer/hooks/useRelayUrl";
+import { invalidateCapabilitiesOnLaunchError } from "renderer/hooks/useV2AgentChoices";
 import { authClient } from "renderer/lib/auth-client";
 import { electronTrpc } from "renderer/lib/electron-trpc";
 import { getHostServiceWsToken } from "renderer/lib/host-service-auth";
@@ -15,6 +16,7 @@ import {
 } from "renderer/lib/host-service-client";
 import { getHostServiceUnavailableMessage } from "renderer/lib/host-service-unavailable";
 import { electronTrpcClient } from "renderer/lib/trpc-client";
+import { electronQueryClient } from "renderer/providers/ElectronTRPCProvider";
 import { useCollections } from "renderer/routes/_authenticated/providers/CollectionsProvider";
 import type {
 	WorkspacesCreateAnyInput,
@@ -413,6 +415,11 @@ export function useWorkspaceCreates(): UseWorkspaceCreatesApi {
 					};
 				})
 				.catch<SubmitOutcome>((error: unknown) => {
+					invalidateCapabilitiesOnLaunchError(
+						electronQueryClient,
+						hostUrl,
+						error,
+					);
 					const message =
 						error instanceof Error ? error.message : String(error);
 					hostWorkspacesCache.removeWorkspace(args.hostId, workspaceId);

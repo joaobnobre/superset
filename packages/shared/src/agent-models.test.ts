@@ -13,6 +13,7 @@ import {
 	getAgentModelSupport,
 	getAgentModeSupport,
 	getAgentSpeedSupport,
+	resolveAgentEffortSupport,
 	SUPERSET_CHAT_MODELS,
 } from "./agent-models";
 import { BUILTIN_TERMINAL_AGENT_TYPES } from "./builtin-terminal-agents";
@@ -325,6 +326,35 @@ describe("getAgentEffortSupport", () => {
 	});
 });
 
+describe("resolveAgentEffortSupport", () => {
+	it("uses the curated fallback only when runtime metadata is unknown", () => {
+		expect(
+			resolveAgentEffortSupport("codex", "gpt-5.6-sol", {
+				state: "unknown",
+			})?.efforts,
+		).toEqual(getAgentEffortSupport("codex", "gpt-5.6-sol")?.efforts);
+	});
+
+	it("does not revive a curated fallback when reasoning is unsupported", () => {
+		expect(
+			resolveAgentEffortSupport("codex", "gpt-5.6-sol", {
+				state: "unsupported",
+			}),
+		).toBeUndefined();
+	});
+
+	it("keeps runtime options while reusing trusted transport metadata", () => {
+		const support = resolveAgentEffortSupport("pi", "provider/model", {
+			state: "supported",
+			defaultId: "max",
+			options: [{ id: "max", label: "Max" }],
+		});
+		expect(support?.defaultEffortId).toBe("max");
+		expect(support?.effortFlag).toBe("--thinking");
+		expect(support?.efforts).toEqual([{ id: "max", label: "Max" }]);
+	});
+});
+
 describe("Codex picker catalog", () => {
 	it("matches the installed Codex model catalog", () => {
 		const support = getAgentEffortSupport("codex", "gpt-5.6-sol");
@@ -465,6 +495,16 @@ describe("buildAgentModelEnv (vibe)", () => {
 	});
 	it("returns {} for an unknown model id (degrade to Vibe default)", () => {
 		expect(buildAgentModelEnv("vibe", "not-a-model")).toEqual({});
+	});
+	it("honors a runtime inventory instead of the static catalog", () => {
+		expect(
+			buildAgentModelEnv("vibe", "vibe-runtime-model", ["vibe-runtime-model"]),
+		).toEqual({
+			VIBE_ACTIVE_MODEL: "vibe-runtime-model",
+		});
+		expect(
+			buildAgentModelEnv("vibe", "mistral-medium-3.5", ["vibe-runtime-model"]),
+		).toEqual({});
 	});
 	it("returns {} when no model is selected", () => {
 		expect(buildAgentModelEnv("vibe", undefined)).toEqual({});

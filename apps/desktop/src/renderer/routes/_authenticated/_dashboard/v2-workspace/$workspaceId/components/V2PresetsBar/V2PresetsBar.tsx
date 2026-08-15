@@ -18,16 +18,19 @@ import {
 } from "renderer/assets/app-icons/preset-icons";
 import { HotkeyMenuShortcut } from "renderer/components/HotkeyMenuShortcut";
 import { useBuiltinPresets } from "renderer/hooks/useBuiltinPresets";
+import { useV2AgentChoices } from "renderer/hooks/useV2AgentChoices";
 import { useV2AgentConfigs } from "renderer/hooks/useV2AgentConfigs";
 import { useV2UserPreferences } from "renderer/hooks/useV2UserPreferences";
 import type { HotkeyId } from "renderer/hotkeys";
 import { posthog } from "renderer/lib/posthog";
 import { resolveV2PresetIcon } from "renderer/lib/preset-icon";
+import { useWorkspace } from "renderer/routes/_authenticated/_dashboard/v2-workspace/providers/WorkspaceProvider";
 import { useCollections } from "renderer/routes/_authenticated/providers/CollectionsProvider";
 import type { V2TerminalPresetRow } from "renderer/routes/_authenticated/providers/CollectionsProvider/dashboardSidebarLocal";
-import { useLocalHostService } from "renderer/routes/_authenticated/providers/LocalHostServiceProvider";
+import { getLinkedPresetAvailability } from "../../hooks/useV2PresetExecution";
 import { BuiltinPresetBarItem } from "./components/BuiltinPresetBarItem";
 import { V2PresetBarItem } from "./components/V2PresetBarItem";
+import { reorderDisplayedPresetIds } from "./reorderDisplayedPresetIds";
 
 interface V2PresetsBarProps {
 	matchedPresets: V2TerminalPresetRow[];
@@ -79,8 +82,10 @@ export function V2PresetsBar({
 	const navigate = useNavigate();
 	const isDark = useIsDarkTheme();
 	const collections = useCollections();
-	const { activeHostUrl } = useLocalHostService();
-	const { data: agents } = useV2AgentConfigs(activeHostUrl);
+	const { hostUrl } = useWorkspace();
+	const { agents: agentChoices, capabilitiesByAgentId } =
+		useV2AgentChoices(hostUrl);
+	const { data: agents } = useV2AgentConfigs(hostUrl);
 	const builtinPresets = useBuiltinPresets();
 	const { setBuiltinPresetHidden } = useV2UserPreferences();
 
@@ -121,8 +126,20 @@ export function V2PresetsBar({
 			orderedVisiblePresets.push({ preset, index });
 		}
 
-		return orderedVisiblePresets;
-	}, [matchedPresets, localVisiblePresetIds]);
+		return orderedVisiblePresets.filter(
+			({ preset }) =>
+				getLinkedPresetAvailability(
+					preset,
+					capabilitiesByAgentId,
+					agentChoices,
+				) !== "hidden",
+		);
+	}, [
+		agentChoices,
+		capabilitiesByAgentId,
+		matchedPresets,
+		localVisiblePresetIds,
+	]);
 
 	const visiblePresetIndexById = useMemo(
 		() =>
@@ -150,33 +167,35 @@ export function V2PresetsBar({
 		[navigate],
 	);
 
+	const displayedPresetIds = useMemo(
+		() => visiblePresets.map(({ preset }) => preset.id),
+		[visiblePresets],
+	);
+
 	const handleLocalVisibleReorder = useCallback(
 		(fromIndex: number, toIndex: number) => {
-			setLocalVisiblePresetIds((current) => {
-				if (
-					fromIndex < 0 ||
-					fromIndex >= current.length ||
-					toIndex < 0 ||
-					toIndex >= current.length
-				) {
-					return current;
-				}
-				const next = [...current];
-				const [moved] = next.splice(fromIndex, 1);
-				next.splice(toIndex, 0, moved);
-				return next;
-			});
+			setLocalVisiblePresetIds((current) =>
+				reorderDisplayedPresetIds({
+					orderedIds: current,
+					displayedIds: displayedPresetIds,
+					fromIndex,
+					toIndex,
+				}),
+			);
 		},
-		[],
+		[displayedPresetIds],
 	);
 
 	const handlePersistVisibleReorder = useCallback(
 		(presetId: string, targetVisibleIndex: number) => {
-			const reorderedVisiblePresetIds = [...localVisiblePresetIds];
-			const currentVisibleIndex = reorderedVisiblePresetIds.indexOf(presetId);
-			if (currentVisibleIndex === -1) return;
-			const [moved] = reorderedVisiblePresetIds.splice(currentVisibleIndex, 1);
-			reorderedVisiblePresetIds.splice(targetVisibleIndex, 0, moved);
+			const fromIndex = displayedPresetIds.indexOf(presetId);
+			if (fromIndex === -1) return;
+			const reorderedVisiblePresetIds = reorderDisplayedPresetIds({
+				orderedIds: localVisiblePresetIds,
+				displayedIds: displayedPresetIds,
+				fromIndex,
+				toIndex: targetVisibleIndex,
+			});
 
 			const visibleSet = new Set(reorderedVisiblePresetIds);
 			const hidden = matchedPresets
@@ -194,7 +213,12 @@ export function V2PresetsBar({
 				});
 			}
 		},
-		[collections.v2TerminalPresets, localVisiblePresetIds, matchedPresets],
+		[
+			collections.v2TerminalPresets,
+			displayedPresetIds,
+			localVisiblePresetIds,
+			matchedPresets,
+		],
 	);
 
 	const handleTogglePresetVisibility = useCallback(
@@ -253,7 +277,7 @@ export function V2PresetsBar({
 						const isVisible = isPresetVisibleInBar(preset.pinnedToBar);
 						const visibleIndex = visiblePresetIndexById.get(preset.id);
 						const hotkeyId =
-							typeof visibleIndex === "number"
+							visibleIndex !== undefined
 								? PRESET_HOTKEY_IDS[visibleIndex]
 								: undefined;
 						return (
@@ -339,6 +363,11 @@ export function V2PresetsBar({
 			</DropdownMenu>
 			{visiblePresets.map(({ preset }, visibleIndex) => {
 				const hotkeyId = PRESET_HOTKEY_IDS[visibleIndex];
+				const availability = getLinkedPresetAvailability(
+					preset,
+					capabilitiesByAgentId,
+					agentChoices,
+				);
 				return (
 					<V2PresetBarItem
 						key={preset.id}
@@ -347,6 +376,12 @@ export function V2PresetsBar({
 						hotkeyId={hotkeyId}
 						isDark={isDark}
 						agents={agents}
+						disabled={availability === "disabled"}
+						disabledReason={
+							availability === "disabled"
+								? "This agent is not ready on this host"
+								: undefined
+						}
 						onExecutePreset={executePreset}
 						onEdit={(presetToEdit) => handleEditPreset(presetToEdit.id)}
 						onLocalReorder={handleLocalVisibleReorder}

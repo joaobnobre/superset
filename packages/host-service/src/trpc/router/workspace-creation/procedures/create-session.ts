@@ -14,7 +14,7 @@ import {
 	updateLocalWorkspace,
 } from "../../../../workspaces/local-workspace-store";
 import { protectedProcedure } from "../../../index";
-import { validateAgentLaunchEffort } from "../../agents";
+import { validateAgentLaunchSelection } from "../../agents";
 import { initEmptyRepo } from "../../project/utils/resolve-repo";
 import { startCommandTerminal } from "../shared/command-terminal";
 import {
@@ -68,7 +68,7 @@ export const createSession = protectedProcedure
 	.input(createSessionInputSchema)
 	.mutation(async ({ ctx, input }) => {
 		for (const launch of input.agents ?? []) {
-			validateAgentLaunchEffort(ctx.db, launch);
+			await validateAgentLaunchSelection(ctx.db, launch, ctx.capabilityRefresh);
 		}
 
 		// Idempotency: a retry carrying the same optimistic id must return the

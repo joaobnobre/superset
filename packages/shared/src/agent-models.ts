@@ -19,6 +19,15 @@ export interface AgentModelOption {
 	provider?: string;
 }
 
+export type AgentCapabilityTrait<TOption> =
+	| { state: "unknown" }
+	| { state: "unsupported" }
+	| {
+			state: "supported";
+			options: TOption[];
+			defaultId?: string;
+	  };
+
 export interface AgentModelSupport {
 	presetId: string;
 	modelFlag: string | null;
@@ -627,6 +636,27 @@ export function getAgentEffortSupport(
 	};
 }
 
+export function resolveAgentEffortSupport(
+	presetId: string,
+	model: string | null | undefined,
+	reasoning: AgentCapabilityTrait<AgentModelOption> | undefined,
+): AgentEffortSupport | undefined {
+	if (!reasoning || reasoning.state === "unknown") {
+		return getAgentEffortSupport(presetId, model);
+	}
+	if (reasoning.state === "unsupported") return undefined;
+	if (reasoning.options.length === 0) return undefined;
+	const transport = AGENT_EFFORT_SUPPORT.find(
+		(entry) => entry.presetId === presetId,
+	);
+	if (!transport) return undefined;
+	return {
+		...transport,
+		defaultEffortId: reasoning.defaultId,
+		efforts: [...reasoning.options],
+	};
+}
+
 export function getAgentSpeedSupport(
 	presetId: string,
 	model?: string | null,
@@ -800,10 +830,13 @@ export function buildAgentModelArgs(
 export function buildAgentModelEnv(
 	presetId: string,
 	model: string | undefined,
+	runtimeModelIds?: readonly string[],
 ): Record<string, string> {
 	if (!model) return {};
 	const support = getAgentModelSupport(presetId);
 	if (!support?.modelEnv) return {};
-	if (!support.models.some((option) => option.id === model)) return {};
+	const allowedModelIds =
+		runtimeModelIds ?? support.models.map((option) => option.id);
+	if (!allowedModelIds.includes(model)) return {};
 	return { [support.modelEnv]: model };
 }

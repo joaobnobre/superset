@@ -23,6 +23,8 @@ interface V2PresetBarItemProps {
 	hotkeyId?: HotkeyId;
 	isDark: boolean;
 	agents: HostAgentConfig[] | undefined;
+	disabled?: boolean;
+	disabledReason?: string;
 	onExecutePreset: (preset: V2TerminalPresetRow) => void;
 	onEdit: (preset: V2TerminalPresetRow) => void;
 	onLocalReorder: (fromIndex: number, toIndex: number) => void;
@@ -35,6 +37,8 @@ export function V2PresetBarItem({
 	hotkeyId,
 	isDark,
 	agents,
+	disabled = false,
+	disabledReason,
 	onExecutePreset,
 	onEdit,
 	onLocalReorder,
@@ -89,8 +93,13 @@ export function V2PresetBarItem({
 						<Button
 							variant="ghost"
 							size="sm"
-							className="h-6 max-w-32 min-w-0 shrink-0 gap-1.5 rounded-md px-1.5 text-xs font-normal text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
-							onClick={() => onExecutePreset(preset)}
+							disabled={disabled}
+							title={disabled ? disabledReason : undefined}
+							className="h-6 max-w-32 min-w-0 shrink-0 gap-1.5 rounded-md px-1.5 text-xs font-normal text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground disabled:opacity-40"
+							onClick={() => {
+								if (disabled) return;
+								onExecutePreset(preset);
+							}}
 						>
 							{icon ? (
 								<img
@@ -109,7 +118,13 @@ export function V2PresetBarItem({
 				</div>
 			</ContextMenuTrigger>
 			<ContextMenuContent>
-				<ContextMenuItem onSelect={() => onExecutePreset(preset)}>
+				<ContextMenuItem
+					disabled={disabled}
+					onSelect={() => {
+						if (disabled) return;
+						onExecutePreset(preset);
+					}}
+				>
 					Run preset
 				</ContextMenuItem>
 				<ContextMenuSeparator />

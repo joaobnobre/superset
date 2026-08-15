@@ -1,15 +1,27 @@
 import { spawn } from "node:child_process";
-import { constants } from "node:fs";
-import { access, open, readdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { delimiter, isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import { CopilotClient, type ModelInfo } from "@github/copilot-sdk";
-import { getAgentModelSupport } from "@superset/shared/agent-models";
+import {
+	collectProcessTree,
+	readProcessTableAsync,
+} from "@superset/pty-daemon/process-tree";
+import {
+	type AgentCapabilityTrait,
+	type AgentModelOption,
+	getAgentModelSupport,
+} from "@superset/shared/agent-models";
+import { z } from "zod";
 import {
 	getTerminalBaseEnv,
 	stripTerminalRuntimeEnv,
 	waitForTerminalBaseEnv,
 } from "../terminal/env";
+import {
+	type AgentExecutableSource,
+	resolveAgentExecutable,
+} from "./executable-resolver";
 
 export type AgentCapabilityStatus =
 	| "ready"
@@ -17,13 +29,17 @@ export type AgentCapabilityStatus =
 	| "authentication_required";
 
 export type AgentModelSource = "runtime" | "fallback" | "none";
+export type AgentCapabilityErrorKind =
+	| "timeout"
+	| "process_failure"
+	| "parse_failure"
+	| "missing_executable";
 
 export interface AgentCapabilityModel {
 	id: string;
 	label: string;
 	provider?: string;
-	defaultEffortId?: string;
-	efforts?: Array<{ id: string; label: string }>;
+	reasoning: AgentCapabilityTrait<AgentModelOption>;
 }
 
 export interface AgentCapabilitySnapshot {
@@ -37,6 +53,12 @@ export interface AgentCapabilitySnapshot {
 	models: AgentCapabilityModel[];
 	message: string | null;
 	checkedAt: string;
+	resolverSource?: AgentExecutableSource | null;
+	errorKind?: AgentCapabilityErrorKind | null;
+	inventoryCheckedAt?: string | null;
+	inventoryOrigin?: "live" | "persisted" | "none";
+	healthOrigin?: "live" | "persisted";
+	refreshStatus?: "idle" | "refreshing" | "backoff";
 }
 
 export interface AgentCapabilityConfig {
@@ -44,6 +66,8 @@ export interface AgentCapabilityConfig {
 	presetId: string;
 	command: string;
 	env: Record<string, string>;
+	configRevision?: number;
+	cacheNamespace?: string;
 }
 
 interface CommandResult {
@@ -51,6 +75,21 @@ interface CommandResult {
 	stdout: string;
 	stderr: string;
 	timedOut: boolean;
+}
+
+function classifyCommandFailure(
+	result: CommandResult,
+): AgentCapabilityErrorKind {
+	if (result.timedOut) return "timeout";
+	if (result.exitCode === 0) return "parse_failure";
+	return "process_failure";
+}
+
+export class AgentCapabilityProbeAbortedError extends Error {
+	constructor() {
+		super("Agent capability probe was cancelled");
+		this.name = "AgentCapabilityProbeAbortedError";
+	}
 }
 
 const PROBE_TIMEOUT_MS = 4_000;
@@ -77,132 +116,251 @@ const capabilityCache = new Map<
 	string,
 	{ expiresAt: number; snapshot: AgentCapabilitySnapshot }
 >();
+const capabilityInFlight = new Map<string, Promise<AgentCapabilitySnapshot>>();
 
 function cacheKey(config: AgentCapabilityConfig): string {
-	return `${config.id}:${config.command}:${JSON.stringify(config.env)}`;
+	return `${config.cacheNamespace ?? "global"}:${config.id}:${config.configRevision ?? 0}`;
 }
 
-async function resolveExecutable(
-	command: string,
-	env: NodeJS.ProcessEnv,
-	options: { preferDirectBinary?: boolean } = {},
-): Promise<string | null> {
-	const candidates =
-		isAbsolute(command) || command.includes("/")
-			? [command]
-			: (env.PATH ?? "")
-					.split(delimiter)
-					.filter(Boolean)
-					.map((directory) => join(directory, command));
-	const executableCandidates: string[] = [];
-	for (const candidate of candidates) {
-		try {
-			await access(candidate, constants.X_OK);
-			executableCandidates.push(candidate);
-		} catch {
-			// Keep looking through PATH.
-		}
+const PROBE_GRACE_PERIOD_MS = 250;
+const PROBE_KILL_SAFETY_MS = 500;
+const nodeErrorSchema = z.object({ code: z.string() }).passthrough();
+
+function isPidAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		const parsed = nodeErrorSchema.safeParse(error);
+		return parsed.success && parsed.data.code === "EPERM";
 	}
-	if (options.preferDirectBinary && executableCandidates.length > 1) {
-		for (const candidate of executableCandidates) {
-			let handle: Awaited<ReturnType<typeof open>> | null = null;
-			try {
-				handle = await open(candidate, "r");
-				const bytes = Buffer.alloc(2);
-				await handle.read(bytes, 0, bytes.length, 0);
-				const prefix = bytes.toString();
-				if (prefix !== "#!") return candidate;
-			} catch {
-				// Fall back to normal PATH order when a candidate cannot be inspected.
-			} finally {
-				await handle?.close();
-			}
-		}
-	}
-	if (options.preferDirectBinary) {
-		for (const wrapper of executableCandidates) {
-			try {
-				const source = await readFile(wrapper, "utf8");
-				const packageName = source.match(/^package="([^"]+)"$/m)?.[1];
-				const binaryName = source.match(/^command="([^"]+)"$/m)?.[1];
-				if (!packageName || !binaryName) continue;
-				const cacheRoot = join(env.HOME ?? homedir(), ".npm", "_npx");
-				for (const entry of await readdir(cacheRoot)) {
-					try {
-						const packageRoot = join(
-							cacheRoot,
-							entry,
-							"node_modules",
-							...packageName.split("/"),
-						);
-						await access(join(packageRoot, "package.json"), constants.R_OK);
-						const candidate = join(
-							cacheRoot,
-							entry,
-							"node_modules",
-							".bin",
-							binaryName,
-						);
-						await access(candidate, constants.X_OK);
-						return candidate;
-					} catch {
-						// This npx cache entry belongs to a different package.
-					}
-				}
-			} catch {
-				// Not an Omarchy npx wrapper, or its package is not cached yet.
-			}
-		}
-	}
-	return executableCandidates[0] ?? null;
 }
 
-function runCommand(
+function signalPid(pid: number, signal: NodeJS.Signals): void {
+	try {
+		process.kill(pid, signal);
+	} catch {
+		// Already gone, or not signalable.
+	}
+}
+
+function signalKnownPids(
+	knownPids: Iterable<number>,
+	signal: NodeJS.Signals,
+): void {
+	for (const pid of knownPids) signalPid(pid, signal);
+}
+
+async function expandProcessTree(knownPids: Set<number>): Promise<void> {
+	if (knownPids.size === 0) return;
+	const table = await readProcessTableAsync();
+	if (!table) return;
+	for (const root of [...knownPids]) {
+		for (const pid of collectProcessTree(root, table)) {
+			knownPids.add(pid);
+		}
+	}
+}
+
+export function runCommand(
 	command: string,
 	args: string[],
 	env: NodeJS.ProcessEnv,
 	timeoutMs = PROBE_TIMEOUT_MS,
 	input?: string,
 	completeWhenStdout?: (stdout: string) => boolean,
+	signal?: AbortSignal,
+	gracePeriodMs = PROBE_GRACE_PERIOD_MS,
 ): Promise<CommandResult> {
-	return new Promise((resolve) => {
+	return new Promise((resolve, reject) => {
 		const child = spawn(command, args, {
 			env,
 			stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
 		});
+
 		if (input !== undefined) child.stdin?.end(input);
+
 		let stdout = "";
 		let stderr = "";
 		let settled = false;
-		let timer: ReturnType<typeof setTimeout>;
-		const finish = (result: CommandResult) => {
+		let childClosed = false;
+		let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+		let graceTimer: ReturnType<typeof setTimeout> | undefined;
+		let safetyTimer: ReturnType<typeof setTimeout> | undefined;
+
+		const closeWaiters: Array<() => void> = [];
+
+		const markClosed = () => {
+			if (childClosed) return;
+			childClosed = true;
+			for (const waiter of closeWaiters) waiter();
+			closeWaiters.length = 0;
+		};
+
+		// `close` is the reap/stdio-drain boundary. `exit` can fire while
+		// buffered output is still in flight. Spawn failure has no process.
+		child.on("close", markClosed);
+		child.on("error", markClosed);
+
+		const waitForCloseOrTimeout = (
+			ms: number,
+			assignTimer: (timer: ReturnType<typeof setTimeout>) => void,
+		): Promise<"closed" | "timeout"> => {
+			if (childClosed) return Promise.resolve("closed");
+			return new Promise((resolveWait) => {
+				const timer = setTimeout(() => resolveWait("timeout"), ms);
+				timer.unref?.();
+				assignTimer(timer);
+				closeWaiters.push(() => {
+					clearTimeout(timer);
+					resolveWait("closed");
+				});
+				if (childClosed) {
+					clearTimeout(timer);
+					resolveWait("closed");
+				}
+			});
+		};
+
+		const clearAssignedTimer = (
+			timer: ReturnType<typeof setTimeout> | undefined,
+		) => {
+			if (timer) clearTimeout(timer);
+		};
+
+		const cleanupTimersAndListeners = () => {
+			clearAssignedTimer(timeoutTimer);
+			clearAssignedTimer(graceTimer);
+			clearAssignedTimer(safetyTimer);
+			timeoutTimer = undefined;
+			graceTimer = undefined;
+			safetyTimer = undefined;
+			signal?.removeEventListener("abort", handleAbort);
+		};
+
+		const killChildAndAwaitTermination = async (): Promise<void> => {
+			const rootPid = child.pid;
+			const knownPids = new Set<number>();
+			if (rootPid) knownPids.add(rootPid);
+
+			if (process.platform === "win32") {
+				try {
+					child.kill();
+				} catch {
+					// Already gone.
+				}
+				await waitForCloseOrTimeout(PROBE_KILL_SAFETY_MS, (timer) => {
+					safetyTimer = timer;
+				});
+				clearAssignedTimer(safetyTimer);
+				safetyTimer = undefined;
+				return;
+			}
+
+			await expandProcessTree(knownPids);
+			signalKnownPids(knownPids, "SIGTERM");
+			try {
+				child.kill("SIGTERM");
+			} catch {
+				// Already gone.
+			}
+
+			await waitForCloseOrTimeout(gracePeriodMs, (timer) => {
+				graceTimer = timer;
+			});
+			clearAssignedTimer(graceTimer);
+			graceTimer = undefined;
+
+			await expandProcessTree(knownPids);
+			signalKnownPids([...knownPids].filter(isPidAlive), "SIGKILL");
+			try {
+				child.kill("SIGKILL");
+			} catch {
+				// Already gone.
+			}
+
+			if (!childClosed) {
+				await waitForCloseOrTimeout(PROBE_KILL_SAFETY_MS, (timer) => {
+					safetyTimer = timer;
+				});
+				clearAssignedTimer(safetyTimer);
+				safetyTimer = undefined;
+			}
+
+			signalKnownPids([...knownPids].filter(isPidAlive), "SIGKILL");
+		};
+
+		const finishNatural = (exitCode: number | null) => {
 			if (settled) return;
 			settled = true;
-			clearTimeout(timer);
-			resolve(result);
+			cleanupTimersAndListeners();
+			resolve({ exitCode, stdout, stderr, timedOut: false });
 		};
+
+		const finishWithKill = async (partial: {
+			exitCode: number | null;
+			timedOut: boolean;
+		}) => {
+			if (settled) return;
+			settled = true;
+			cleanupTimersAndListeners();
+			try {
+				await killChildAndAwaitTermination();
+			} catch {
+				// Settlement must stay bounded if termination helpers fail.
+			}
+			resolve({
+				exitCode: partial.exitCode,
+				stdout,
+				stderr,
+				timedOut: partial.timedOut,
+			});
+		};
+
+		const handleAbort = () => {
+			if (settled) return;
+			settled = true;
+			cleanupTimersAndListeners();
+			void (async () => {
+				try {
+					await killChildAndAwaitTermination();
+				} catch {
+					// Settlement must stay bounded if termination helpers fail.
+				}
+				reject(new AgentCapabilityProbeAbortedError());
+			})();
+		};
+
 		const append = (current: string, chunk: Buffer) =>
 			(current + chunk.toString()).slice(-MAX_OUTPUT_LENGTH);
+
 		child.stdout?.on("data", (chunk: Buffer) => {
 			stdout = append(stdout, chunk);
-			if (completeWhenStdout?.(stdout)) {
-				child.kill("SIGTERM");
-				finish({ exitCode: 0, stdout, stderr, timedOut: false });
+			if (!settled && completeWhenStdout?.(stdout)) {
+				void finishWithKill({ exitCode: 0, timedOut: false });
 			}
 		});
+
 		child.stderr?.on("data", (chunk: Buffer) => {
 			stderr = append(stderr, chunk);
 		});
-		child.on("error", () =>
-			finish({ exitCode: null, stdout, stderr, timedOut: false }),
-		);
-		child.on("close", (exitCode) =>
-			finish({ exitCode, stdout, stderr, timedOut: false }),
-		);
-		timer = setTimeout(() => {
-			child.kill("SIGTERM");
-			finish({ exitCode: null, stdout, stderr, timedOut: true });
+
+		child.on("error", () => {
+			finishNatural(null);
+		});
+
+		child.on("close", (exitCode) => {
+			finishNatural(exitCode);
+		});
+
+		timeoutTimer = setTimeout(() => {
+			void finishWithKill({ exitCode: null, timedOut: true });
 		}, timeoutMs);
+
+		signal?.addEventListener("abort", handleAbort, { once: true });
+		if (signal?.aborted) {
+			handleAbort();
+		}
 	});
 }
 
@@ -216,37 +374,55 @@ async function createProbeEnvironment(configEnv: Record<string, string>) {
 		// snapshot. Keep their fallback free from desktop/runtime variables too.
 		baseEnv = stripTerminalRuntimeEnv(
 			Object.fromEntries(
-				Object.entries(process.env).flatMap(([key, value]) =>
-					typeof value === "string" ? [[key, value]] : [],
+				Object.entries(process.env).filter(
+					(entry): entry is [string, string] => entry[1] !== undefined,
 				),
 			),
 		);
 	}
-	return {
+	const probeEnv = {
 		...baseEnv,
 		// The login-shell snapshot can inherit temporary Codex/npm shims that
 		// make OpenCode spend tens of seconds initializing plugins. The host's
 		// PATH has already been assembled for this machine and resolves the same
 		// user CLI without those transient prefixes.
-		...(process.env.PATH ? { PATH: process.env.PATH } : {}),
 		...configEnv,
 	};
+	if (process.env.PATH) probeEnv.PATH = process.env.PATH;
+	return probeEnv;
 }
 
 async function probeAuthentication(
 	presetId: string,
 	executable: string,
 	env: NodeJS.ProcessEnv,
+	signal?: AbortSignal,
 ): Promise<AgentCapabilitySnapshot["auth"]> {
-	const argsByPreset: Partial<Record<string, string[]>> = {
-		amp: ["config", "model-providers", "list", "--no-color"],
-		claude: ["auth", "status", "--json"],
-		codex: ["login", "status"],
-		polygraph: ["whoami", "--json"],
-	};
-	const args = argsByPreset[presetId];
+	let args: string[] | undefined;
+	switch (presetId) {
+		case "amp":
+			args = ["config", "model-providers", "list", "--no-color"];
+			break;
+		case "claude":
+			args = ["auth", "status", "--json"];
+			break;
+		case "codex":
+			args = ["login", "status"];
+			break;
+		case "polygraph":
+			args = ["whoami", "--json"];
+			break;
+	}
 	if (!args) return "unknown";
-	const result = await runCommand(executable, args, env);
+	const result = await runCommand(
+		executable,
+		args,
+		env,
+		PROBE_TIMEOUT_MS,
+		undefined,
+		undefined,
+		signal,
+	);
 	const output = `${result.stdout}\n${result.stderr}`;
 	if (
 		result.exitCode === 0 &&
@@ -286,7 +462,11 @@ export function parseLineModels(output: string): AgentCapabilityModel[] {
 		const id = rawLine.trim().split(/\s+/)[0];
 		if (!id || id.startsWith("Error:") || seen.has(id)) continue;
 		seen.add(id);
-		models.push({ id, label: titleFromModelId(id) });
+		models.push({
+			id,
+			label: titleFromModelId(id),
+			reasoning: { state: "unknown" },
+		});
 	}
 	return models;
 }
@@ -319,7 +499,13 @@ export function parseAntigravityModels(output: string): AgentCapabilityModel[] {
 	return discovered.flatMap((model): AgentCapabilityModel[] => {
 		const baseId = baseIdByModelId.get(model.id);
 		if (!baseId)
-			return [{ ...model, label: titleAntigravityModelId(model.id) }];
+			return [
+				{
+					...model,
+					label: titleAntigravityModelId(model.id),
+					reasoning: { state: "unsupported" },
+				},
+			];
 		const variants = variantsByBaseId.get(baseId) ?? [];
 		if (variants.length < 2) {
 			return [{ ...model, label: titleAntigravityModelId(model.id) }];
@@ -338,8 +524,11 @@ export function parseAntigravityModels(output: string): AgentCapabilityModel[] {
 			{
 				id: defaultVariant.model.id,
 				label: titleAntigravityModelId(baseId),
-				defaultEffortId: defaultVariant.effort,
-				efforts,
+				reasoning: {
+					state: "supported",
+					defaultId: defaultVariant.effort,
+					options: efforts,
+				},
 			},
 		];
 	});
@@ -351,44 +540,38 @@ export function parseGrokModels(output: string): AgentCapabilityModel[] {
 			/^\s*(?:\*|-)\s+([^\s(]+)(?:\s+\(default\))?\s*$/,
 		);
 		if (!match?.[1]) return [];
-		return [{ id: match[1], label: titleFromModelId(match[1]) }];
+		return [
+			{
+				id: match[1],
+				label: titleFromModelId(match[1]),
+				reasoning: { state: "unknown" },
+			},
+		];
 	});
 }
 
 export function parseKimiProviderModels(
 	output: string,
 ): AgentCapabilityModel[] | null {
-	let parsed: unknown;
+	let decoded: z.infer<typeof kimiProviderResponseSchema>;
 	try {
-		parsed = JSON.parse(output);
+		const parsed = kimiProviderResponseSchema.safeParse(JSON.parse(output));
+		if (!parsed.success) return null;
+		decoded = parsed.data;
 	} catch {
 		return null;
 	}
-	if (!parsed || typeof parsed !== "object") return null;
-	const models = (parsed as { models?: unknown }).models;
-	if (!models || typeof models !== "object" || Array.isArray(models)) return [];
-	return Object.entries(models).map(([id, raw]) => {
-		const model =
-			raw && typeof raw === "object"
-				? (raw as {
-						name?: unknown;
-						label?: unknown;
-						provider?: unknown;
-					})
-				: null;
-		const label =
-			typeof model?.label === "string"
-				? model.label
-				: typeof model?.name === "string"
-					? model.name
-					: titleFromModelId(id);
-		return {
+	const models = kimiProviderModelsSchema.safeParse(decoded.models);
+	if (!models.success) return [];
+	return Object.entries(models.data).map(([id, model]) => {
+		const label = model?.label ?? model?.name ?? titleFromModelId(id);
+		const capability: AgentCapabilityModel = {
 			id,
 			label,
-			...(typeof model?.provider === "string"
-				? { provider: labelProvider(model.provider) }
-				: {}),
+			reasoning: { state: "unknown" },
 		};
+		if (model?.provider) capability.provider = labelProvider(model.provider);
+		return capability;
 	});
 }
 
@@ -403,74 +586,88 @@ export function parsePiModels(output: string): AgentCapabilityModel[] {
 				id: `${provider}/${model}`,
 				label: titleFromModelId(model),
 				provider: labelProvider(provider),
+				reasoning: { state: "unknown" },
 			},
 		];
 	});
 }
 
-interface PiRpcModel {
-	id?: unknown;
-	name?: unknown;
-	provider?: unknown;
-	reasoning?: unknown;
-	thinkingLevelMap?: unknown;
-}
+const kimiProviderModelSchema = z
+	.object({
+		name: z.string().optional().catch(undefined),
+		label: z.string().optional().catch(undefined),
+		provider: z.string().optional().catch(undefined),
+	})
+	.passthrough()
+	.nullable()
+	.catch(null);
+const kimiProviderModelsSchema = z.record(z.string(), kimiProviderModelSchema);
+const kimiProviderResponseSchema = z
+	.object({
+		models: z.json().optional(),
+	})
+	.passthrough();
 
-function getPiEfforts(model: PiRpcModel): Array<{ id: string; label: string }> {
-	if (model.reasoning !== true) return [{ id: "off", label: "Off" }];
-	const map =
-		model.thinkingLevelMap && typeof model.thinkingLevelMap === "object"
-			? (model.thinkingLevelMap as Record<string, unknown>)
-			: {};
+const piRpcModelSchema = z
+	.object({
+		id: z.string(),
+		name: z.string().optional(),
+		provider: z.string(),
+		reasoning: z.boolean().optional(),
+		thinkingLevelMap: z.record(z.string(), z.json()).optional(),
+	})
+	.passthrough();
+type PiRpcModel = z.infer<typeof piRpcModelSchema>;
+const piRpcResponseSchema = z
+	.object({
+		type: z.literal("response"),
+		command: z.literal("get_available_models"),
+		success: z.literal(true),
+		data: z.object({ models: z.array(z.json()) }).passthrough(),
+	})
+	.passthrough();
+
+function getPiReasoning(
+	model: PiRpcModel,
+): AgentCapabilityTrait<AgentModelOption> {
+	if (model.reasoning === false) return { state: "unsupported" };
+	if (model.reasoning !== true) return { state: "unknown" };
+	const map = model.thinkingLevelMap ?? {};
 	const standard = ["off", "minimal", "low", "medium", "high"].filter(
 		(level) => map[level] !== null,
 	);
 	const advanced = ["xhigh", "max"].filter(
 		(level) => Object.hasOwn(map, level) && map[level] !== null,
 	);
-	return [...standard, ...advanced].map((effort) => ({
-		id: effort,
-		label: titleFromModelId(effort),
-	}));
+	return {
+		state: "supported",
+		options: [...standard, ...advanced].map((effort) => ({
+			id: effort,
+			label: titleFromModelId(effort),
+		})),
+	};
 }
 
 export function parsePiRpcModels(output: string): AgentCapabilityModel[] {
 	for (const rawLine of output.split(/\r?\n/)) {
-		let response: unknown;
+		let decoded: z.infer<typeof piRpcResponseSchema>;
 		try {
-			response = JSON.parse(rawLine);
+			const response = piRpcResponseSchema.safeParse(JSON.parse(rawLine));
+			if (!response.success) continue;
+			decoded = response.data;
 		} catch {
 			continue;
 		}
-		if (!response || typeof response !== "object") continue;
-		const rpc = response as {
-			type?: unknown;
-			command?: unknown;
-			success?: unknown;
-			data?: { models?: unknown };
-		};
-		if (
-			rpc.type !== "response" ||
-			rpc.command !== "get_available_models" ||
-			rpc.success !== true ||
-			!Array.isArray(rpc.data?.models)
-		) {
-			continue;
-		}
-		return rpc.data.models.flatMap((raw): AgentCapabilityModel[] => {
-			if (!raw || typeof raw !== "object") return [];
-			const model = raw as PiRpcModel;
-			if (typeof model.id !== "string" || typeof model.provider !== "string")
-				return [];
+		return decoded.data.models.flatMap((raw): AgentCapabilityModel[] => {
+			const parsed = piRpcModelSchema.safeParse(raw);
+			if (!parsed.success) return [];
+			const model = parsed.data;
 			return [
 				{
 					id: `${model.provider}/${model.id}`,
-					label:
-						typeof model.name === "string" && model.name
-							? model.name
-							: titleFromModelId(model.id),
+					label: model.name || titleFromModelId(model.id),
 					provider: labelProvider(model.provider),
-					efforts: getPiEfforts(model),
+					reasoning: getPiReasoning(model),
 				},
 			];
 		});
@@ -478,21 +675,30 @@ export function parsePiRpcModels(output: string): AgentCapabilityModel[] {
 	return [];
 }
 
-interface OpenCodeCliModelMetadata {
-	name?: unknown;
-	providerID?: unknown;
-	variants?: unknown;
-}
+const openCodeMetadataSchema = z
+	.object({
+		name: z.string().optional().catch(undefined),
+		providerID: z.string().optional().catch(undefined),
+		variants: z.record(z.string(), z.json()).optional().catch(undefined),
+	})
+	.passthrough();
+type OpenCodeCliModelMetadata = z.infer<typeof openCodeMetadataSchema>;
 
 function labelProvider(providerId: string): string {
-	const labels: Record<string, string> = {
-		anthropic: "Anthropic",
-		opencode: "OpenCode",
-		openai: "OpenAI",
-		"openai-codex": "OpenAI Codex",
-		openrouter: "OpenRouter",
-	};
-	return labels[providerId] ?? titleFromModelId(providerId);
+	switch (providerId) {
+		case "anthropic":
+			return "Anthropic";
+		case "opencode":
+			return "OpenCode";
+		case "openai":
+			return "OpenAI";
+		case "openai-codex":
+			return "OpenAI Codex";
+		case "openrouter":
+			return "OpenRouter";
+		default:
+			return titleFromModelId(providerId);
+	}
 }
 
 /**
@@ -513,34 +719,37 @@ export function parseOpenCodeModels(output: string): AgentCapabilityModel[] {
 		}
 		let metadata: OpenCodeCliModelMetadata | null = null;
 		try {
-			metadata = JSON.parse(
-				metadataLines.join("\n"),
-			) as OpenCodeCliModelMetadata;
+			const parsed = openCodeMetadataSchema.safeParse(
+				JSON.parse(metadataLines.join("\n")),
+			);
+			if (parsed.success) metadata = parsed.data;
 		} catch {
 			// Older OpenCode releases emit only slugs.
 		}
 		seen.add(currentSlug);
-		const efforts =
-			metadata?.variants &&
-			typeof metadata.variants === "object" &&
-			!Array.isArray(metadata.variants)
-				? Object.keys(metadata.variants).map((id) => ({
-						id,
-						label: titleFromModelId(id),
-					}))
-				: undefined;
+		const variantIds = metadata?.variants
+			? Object.keys(metadata.variants)
+			: null;
+		let reasoning: AgentCapabilityTrait<AgentModelOption> = {
+			state: "unknown",
+		};
+		if (metadata) reasoning = { state: "unsupported" };
+		if (variantIds?.length) {
+			reasoning = {
+				state: "supported",
+				options: variantIds.map((id) => ({
+					id,
+					label: titleFromModelId(id),
+				})),
+			};
+		}
 		models.push({
 			id: currentSlug,
-			label:
-				typeof metadata?.name === "string" && metadata.name.trim()
-					? metadata.name.trim()
-					: titleFromModelId(currentSlug),
+			label: metadata?.name?.trim() || titleFromModelId(currentSlug),
 			provider: labelProvider(
-				typeof metadata?.providerID === "string"
-					? metadata.providerID
-					: (currentSlug.split("/")[0] ?? currentSlug),
+				metadata?.providerID ?? currentSlug.split("/")[0] ?? currentSlug,
 			),
-			...(efforts ? { efforts } : {}),
+			reasoning,
 		});
 		currentSlug = null;
 		metadataLines.length = 0;
@@ -569,22 +778,40 @@ export function mapCopilotModels(
 	return models.map((model) => ({
 		id: model.id,
 		label: model.name,
-		...(model.defaultReasoningEffort
-			? { defaultEffortId: model.defaultReasoningEffort }
-			: {}),
-		// An empty array is authoritative: this authenticated model exposes no
-		// reasoning override, so the UI must not fall back to a static catalog.
-		efforts: (model.supportedReasoningEfforts ?? []).map((effort) => ({
+		reasoning: copilotModelReasoning(model),
+	}));
+}
+
+function copilotModelReasoning(
+	model: Pick<
+		ModelInfo,
+		"supportedReasoningEfforts" | "defaultReasoningEffort"
+	>,
+): AgentCapabilityTrait<AgentModelOption> {
+	if (!Array.isArray(model.supportedReasoningEfforts)) {
+		return { state: "unknown" };
+	}
+	if (model.supportedReasoningEfforts.length === 0) {
+		return { state: "unsupported" };
+	}
+	const reasoning: AgentCapabilityTrait<AgentModelOption> = {
+		state: "supported",
+		options: model.supportedReasoningEfforts.map((effort) => ({
 			id: effort,
 			label: titleFromModelId(effort),
 		})),
-	}));
+	};
+	if (model.defaultReasoningEffort) {
+		reasoning.defaultId = model.defaultReasoningEffort;
+	}
+	return reasoning;
 }
 
 async function discoverCopilotModels(env: NodeJS.ProcessEnv): Promise<{
 	models: AgentCapabilityModel[];
 	auth: AgentCapabilitySnapshot["auth"];
 	message: string | null;
+	errorKind: AgentCapabilityErrorKind | null;
 }> {
 	const client = new CopilotClient({ env, logLevel: "none" });
 	try {
@@ -594,48 +821,75 @@ async function discoverCopilotModels(env: NodeJS.ProcessEnv): Promise<{
 			return {
 				models: [],
 				auth: "unauthenticated",
-				message: auth.statusMessage ?? "Authentication required",
+				message: "Authentication required",
+				errorKind: null,
 			};
 		}
 		return {
 			models: mapCopilotModels(await client.listModels()),
 			auth: "authenticated",
 			message: null,
+			errorKind: null,
 		};
 	} catch {
 		return {
 			models: [],
 			auth: "unknown",
 			message: "Could not query models from the Copilot runtime",
+			errorKind: "process_failure",
 		};
 	} finally {
 		await client.stop().catch(() => client.forceStop());
 	}
 }
 
-interface CodexCacheModel {
-	slug?: unknown;
-	display_name?: unknown;
-	visibility?: unknown;
-	upgrade?: unknown;
-	default_reasoning_level?: unknown;
-	supported_reasoning_levels?: unknown;
+const codexReasoningLevelSchema = z
+	.object({ effort: z.string() })
+	.passthrough();
+const codexCacheModelSchema = z
+	.object({
+		slug: z.string().min(1),
+		display_name: z.string().optional().catch(undefined),
+		visibility: z.string().optional().catch(undefined),
+		upgrade: z.json().optional().catch(undefined),
+		default_reasoning_level: z.string().optional().catch(undefined),
+		supported_reasoning_levels: z.array(z.json()).optional().catch(undefined),
+	})
+	.passthrough();
+type CodexCacheModel = z.infer<typeof codexCacheModelSchema>;
+const codexModelsCacheSchema = z
+	.object({ models: z.array(z.json()) })
+	.passthrough();
+
+function codexModelReasoning(
+	model: CodexCacheModel,
+	efforts: AgentModelOption[],
+): AgentCapabilityTrait<AgentModelOption> {
+	if (!model.supported_reasoning_levels) return { state: "unknown" };
+	if (efforts.length === 0) return { state: "unsupported" };
+	const reasoning: AgentCapabilityTrait<AgentModelOption> = {
+		state: "supported",
+		options: efforts,
+	};
+	if (model.default_reasoning_level) {
+		reasoning.defaultId = model.default_reasoning_level;
+	}
+	return reasoning;
 }
 
 export function parseCodexModelsCache(input: string): AgentCapabilityModel[] {
-	let parsed: unknown;
+	let decoded: z.infer<typeof codexModelsCacheSchema>;
 	try {
-		parsed = JSON.parse(input);
+		const parsed = codexModelsCacheSchema.safeParse(JSON.parse(input));
+		if (!parsed.success) return [];
+		decoded = parsed.data;
 	} catch {
 		return [];
 	}
-	if (!parsed || typeof parsed !== "object" || !("models" in parsed)) return [];
-	const rawModels = (parsed as { models?: unknown }).models;
-	if (!Array.isArray(rawModels)) return [];
-	return rawModels.flatMap((raw): AgentCapabilityModel[] => {
-		if (!raw || typeof raw !== "object") return [];
-		const model = raw as CodexCacheModel;
-		if (typeof model.slug !== "string" || !model.slug) return [];
+	return decoded.models.flatMap((raw): AgentCapabilityModel[] => {
+		const parsed = codexCacheModelSchema.safeParse(raw);
+		if (!parsed.success) return [];
+		const model = parsed.data;
 		// The cache also contains internal routing aliases such as Work Mode.
 		// Codex's own model/list response omits entries marked hidden, so mirror
 		// that contract instead of leaking implementation-only models into UI.
@@ -643,29 +897,29 @@ export function parseCodexModelsCache(input: string): AgentCapabilityModel[] {
 		const efforts = Array.isArray(model.supported_reasoning_levels)
 			? model.supported_reasoning_levels.flatMap(
 					(level): Array<{ id: string; label: string }> => {
-						if (!level || typeof level !== "object") return [];
-						const effort = (level as { effort?: unknown }).effort;
-						return typeof effort === "string"
-							? [{ id: effort, label: titleFromModelId(effort) }]
-							: [];
+						const parsedLevel = codexReasoningLevelSchema.safeParse(level);
+						if (!parsedLevel.success) return [];
+						const { effort } = parsedLevel.data;
+						return [{ id: effort, label: titleFromModelId(effort) }];
 					},
 				)
 			: [];
+		if (
+			Array.isArray(model.supported_reasoning_levels) &&
+			model.supported_reasoning_levels.length > 0 &&
+			efforts.length === 0
+		) {
+			return [];
+		}
 		return [
 			{
 				id: model.slug,
-				label:
-					typeof model.display_name === "string" && model.display_name
-						? titleFromModelId(model.display_name)
-						: titleFromModelId(model.slug),
+				label: titleFromModelId(model.display_name || model.slug),
 				provider:
 					model.upgrade !== null && model.upgrade !== undefined
 						? "Legacy Models"
 						: "Current Models",
-				...(typeof model.default_reasoning_level === "string"
-					? { defaultEffortId: model.default_reasoning_level }
-					: {}),
-				...(efforts.length > 0 ? { efforts } : {}),
+				reasoning: codexModelReasoning(model, efforts),
 			},
 		];
 	});
@@ -674,21 +928,57 @@ export function parseCodexModelsCache(input: string): AgentCapabilityModel[] {
 function fallbackModels(presetId: string): AgentCapabilityModel[] {
 	return (getAgentModelSupport(presetId)?.models ?? []).map((model) => ({
 		...model,
+		reasoning: { state: "unknown" },
 	}));
+}
+
+function mergeAuthenticationObservations(
+	discovered: AgentCapabilitySnapshot["auth"],
+	probed: AgentCapabilitySnapshot["auth"],
+): AgentCapabilitySnapshot["auth"] {
+	if (discovered === "unauthenticated" || probed === "unauthenticated") {
+		return "unauthenticated";
+	}
+	if (discovered === "authenticated" || probed === "authenticated") {
+		return "authenticated";
+	}
+	return "unknown";
+}
+
+function capabilityStatusForAuth(
+	auth: AgentCapabilitySnapshot["auth"],
+	presetId: string,
+): AgentCapabilityStatus {
+	if (auth === "unauthenticated") return "authentication_required";
+	if (auth === "unknown" && AUTH_DEPENDENT_PRESETS.has(presetId)) {
+		return "unavailable";
+	}
+	return "ready";
 }
 
 async function discoverModels(
 	config: AgentCapabilityConfig,
 	executable: string,
 	env: NodeJS.ProcessEnv,
+	signal?: AbortSignal,
 ): Promise<{
 	models: AgentCapabilityModel[];
 	source: AgentModelSource;
 	auth: AgentCapabilitySnapshot["auth"];
 	message: string | null;
+	errorKind: AgentCapabilityErrorKind | null;
 }> {
+	let lastErrorKind: AgentCapabilityErrorKind | null = null;
 	if (config.presetId === "antigravity") {
-		const result = await runCommand(executable, ["models"], env);
+		const result = await runCommand(
+			executable,
+			["models"],
+			env,
+			PROBE_TIMEOUT_MS,
+			undefined,
+			undefined,
+			signal,
+		);
 		const models = parseAntigravityModels(result.stdout);
 		const output = `${result.stdout}\n${result.stderr}`;
 		if (
@@ -701,6 +991,7 @@ async function discoverModels(
 				source: "none",
 				auth: "unauthenticated",
 				message: "Authentication required",
+				errorKind: null,
 			};
 		}
 		if (result.exitCode === 0 && models.length > 0) {
@@ -709,6 +1000,7 @@ async function discoverModels(
 				source: "runtime",
 				auth: "authenticated",
 				message: null,
+				errorKind: null,
 			};
 		}
 		return {
@@ -716,6 +1008,7 @@ async function discoverModels(
 			source: "none",
 			auth: "unknown",
 			message: "Could not query models from the Antigravity runtime",
+			errorKind: classifyCommandFailure(result),
 		};
 	}
 
@@ -740,6 +1033,7 @@ async function discoverModels(
 					source: "runtime",
 					auth: "authenticated",
 					message: null,
+					errorKind: null,
 				};
 			}
 		} catch {
@@ -755,10 +1049,19 @@ async function discoverModels(
 			PROBE_TIMEOUT_MS,
 			'{"type":"get_available_models"}\n',
 			(output) => parsePiRpcModels(output).length > 0,
+			signal,
 		);
 		let models = parsePiRpcModels(result.stdout);
 		if (!result.timedOut && (result.exitCode !== 0 || models.length === 0)) {
-			result = await runCommand(executable, ["--list-models"], env);
+			result = await runCommand(
+				executable,
+				["--list-models"],
+				env,
+				PROBE_TIMEOUT_MS,
+				undefined,
+				undefined,
+				signal,
+			);
 			models = parsePiModels(result.stdout);
 		}
 		if (result.exitCode === 0 && models.length > 0) {
@@ -767,6 +1070,7 @@ async function discoverModels(
 				source: "runtime",
 				auth: "authenticated",
 				message: null,
+				errorKind: null,
 			};
 		}
 		return {
@@ -774,11 +1078,20 @@ async function discoverModels(
 			source: "none",
 			auth: "unknown",
 			message: "No authenticated Pi models were found",
+			errorKind: classifyCommandFailure(result),
 		};
 	}
 
 	if (config.presetId === "grok") {
-		const result = await runCommand(executable, ["models"], env);
+		const result = await runCommand(
+			executable,
+			["models"],
+			env,
+			PROBE_TIMEOUT_MS,
+			undefined,
+			undefined,
+			signal,
+		);
 		const models = parseGrokModels(result.stdout);
 		const output = `${result.stdout}\n${result.stderr}`;
 		if (/not logged in|authentication required|run .*login/i.test(output)) {
@@ -787,6 +1100,7 @@ async function discoverModels(
 				source: "none",
 				auth: "unauthenticated",
 				message: "Authentication required",
+				errorKind: null,
 			};
 		}
 		if (result.exitCode === 0 && models.length > 0) {
@@ -795,6 +1109,7 @@ async function discoverModels(
 				source: "runtime",
 				auth: "authenticated",
 				message: null,
+				errorKind: null,
 			};
 		}
 		return {
@@ -802,6 +1117,7 @@ async function discoverModels(
 			source: "none",
 			auth: "unknown",
 			message: "Could not query models from the Grok runtime",
+			errorKind: classifyCommandFailure(result),
 		};
 	}
 
@@ -810,6 +1126,10 @@ async function discoverModels(
 			executable,
 			["provider", "list", "--json"],
 			env,
+			PROBE_TIMEOUT_MS,
+			undefined,
+			undefined,
+			signal,
 		);
 		const models = parseKimiProviderModels(result.stdout);
 		if (result.exitCode === 0 && models?.length) {
@@ -818,6 +1138,7 @@ async function discoverModels(
 				source: "runtime",
 				auth: "authenticated",
 				message: null,
+				errorKind: null,
 			};
 		}
 		if (result.exitCode === 0 && models) {
@@ -826,6 +1147,7 @@ async function discoverModels(
 				source: "none",
 				auth: "unauthenticated",
 				message: "Authentication required",
+				errorKind: null,
 			};
 		}
 		return {
@@ -833,6 +1155,7 @@ async function discoverModels(
 			source: "none",
 			auth: "unknown",
 			message: "Could not query providers from the Kimi runtime",
+			errorKind: classifyCommandFailure(result),
 		};
 	}
 
@@ -841,7 +1164,15 @@ async function discoverModels(
 			config.presetId === "opencode"
 				? ["models", "--verbose"]
 				: ["--list-models"];
-		let result = await runCommand(executable, args, env);
+		let result = await runCommand(
+			executable,
+			args,
+			env,
+			PROBE_TIMEOUT_MS,
+			undefined,
+			undefined,
+			signal,
+		);
 		let models =
 			config.presetId === "opencode"
 				? parseOpenCodeModels(result.stdout)
@@ -850,7 +1181,15 @@ async function discoverModels(
 			config.presetId === "opencode" &&
 			(result.exitCode !== 0 || models.length === 0)
 		) {
-			result = await runCommand(executable, args, env);
+			result = await runCommand(
+				executable,
+				args,
+				env,
+				PROBE_TIMEOUT_MS,
+				undefined,
+				undefined,
+				signal,
+			);
 			models = parseOpenCodeModels(result.stdout);
 		}
 		const output = `${result.stdout}\n${result.stderr}`;
@@ -860,6 +1199,7 @@ async function discoverModels(
 				source: "none",
 				auth: "unauthenticated",
 				message: "Authentication required",
+				errorKind: null,
 			};
 		}
 		if (result.exitCode === 0 && models.length > 0) {
@@ -868,8 +1208,10 @@ async function discoverModels(
 				source: "runtime",
 				auth: "authenticated",
 				message: null,
+				errorKind: null,
 			};
 		}
+		lastErrorKind = classifyCommandFailure(result);
 	}
 
 	const models = fallbackModels(config.presetId);
@@ -878,28 +1220,19 @@ async function discoverModels(
 		source: models.length > 0 ? "fallback" : "none",
 		auth: "unknown",
 		message: models.length > 0 ? "Using the versioned fallback catalog" : null,
+		errorKind: lastErrorKind,
 	};
 }
 
-export async function inspectAgentCapability(
+async function probeAgentCapability(
 	config: AgentCapabilityConfig,
-	options: { force?: boolean; now?: number } = {},
+	now: number,
+	key: string,
+	signal?: AbortSignal,
 ): Promise<AgentCapabilitySnapshot> {
-	const now = options.now ?? Date.now();
-	const key = cacheKey(config);
-	const cached = capabilityCache.get(key);
-	if (!options.force && cached && cached.expiresAt > now)
-		return cached.snapshot;
-
 	const env = await createProbeEnvironment(config.env);
-	const executable = await resolveExecutable(config.command, env, {
-		// Package-manager wrappers may perform network update checks before every
-		// call. Prefer the installed native OpenCode binary later in PATH when one
-		// is present; normal launches can keep using the user's configured wrapper.
-		preferDirectBinary:
-			config.presetId === "opencode" || config.presetId === "pi",
-	});
-	if (!executable) {
+	const resolvedExecutable = await resolveAgentExecutable(config.command, env);
+	if (!resolvedExecutable) {
 		const snapshot: AgentCapabilitySnapshot = {
 			agentId: config.id,
 			presetId: config.presetId,
@@ -911,10 +1244,17 @@ export async function inspectAgentCapability(
 			models: [],
 			message: `${config.command} was not found in PATH`,
 			checkedAt: new Date(now).toISOString(),
+			resolverSource: null,
+			errorKind: "missing_executable",
+			inventoryCheckedAt: null,
+			inventoryOrigin: "none",
+			healthOrigin: "live",
+			refreshStatus: "idle",
 		};
 		capabilityCache.set(key, { expiresAt: now + CACHE_TTL_MS, snapshot });
 		return snapshot;
 	}
+	const executable = resolvedExecutable.path;
 
 	const shouldProbeVersion = new Set([
 		"antigravity",
@@ -926,29 +1266,27 @@ export async function inspectAgentCapability(
 	]).has(config.presetId);
 	const [versionResult, discovery, probedAuth] = await Promise.all([
 		shouldProbeVersion
-			? runCommand(executable, ["--version"], env)
+			? runCommand(
+					executable,
+					["--version"],
+					env,
+					PROBE_TIMEOUT_MS,
+					undefined,
+					undefined,
+					signal,
+				)
 			: Promise.resolve({
 					exitCode: null,
 					stdout: "",
 					stderr: "",
 					timedOut: false,
 				}),
-		discoverModels(config, executable, env),
-		probeAuthentication(config.presetId, executable, env),
+		discoverModels(config, executable, env, signal),
+		probeAuthentication(config.presetId, executable, env, signal),
 	]);
 	const versionLine = versionResult.stdout.trim().split(/\r?\n/)[0] || null;
-	const auth =
-		discovery.auth === "unauthenticated" || probedAuth === "unauthenticated"
-			? "unauthenticated"
-			: discovery.auth === "authenticated" || probedAuth === "authenticated"
-				? "authenticated"
-				: "unknown";
-	const status =
-		auth === "unauthenticated"
-			? "authentication_required"
-			: auth === "unknown" && AUTH_DEPENDENT_PRESETS.has(config.presetId)
-				? "unavailable"
-				: "ready";
+	const auth = mergeAuthenticationObservations(discovery.auth, probedAuth);
+	const status = capabilityStatusForAuth(auth, config.presetId);
 	const snapshot: AgentCapabilitySnapshot = {
 		agentId: config.id,
 		presetId: config.presetId,
@@ -960,9 +1298,40 @@ export async function inspectAgentCapability(
 		models: discovery.models,
 		message: discovery.message,
 		checkedAt: new Date(now).toISOString(),
+		resolverSource: resolvedExecutable.source,
+		errorKind: discovery.errorKind,
+		inventoryCheckedAt:
+			discovery.source === "none" ? null : new Date(now).toISOString(),
+		inventoryOrigin: discovery.source === "none" ? "none" : "live",
+		healthOrigin: "live",
+		refreshStatus: "idle",
 	};
 	capabilityCache.set(key, { expiresAt: now + CACHE_TTL_MS, snapshot });
 	return snapshot;
+}
+
+export function inspectAgentCapability(
+	config: AgentCapabilityConfig,
+	options: { force?: boolean; now?: number; signal?: AbortSignal } = {},
+): Promise<AgentCapabilitySnapshot> {
+	const now = options.now ?? Date.now();
+	const key = cacheKey(config);
+	const cached = capabilityCache.get(key);
+	if (!options.force && cached && cached.expiresAt > now) {
+		return Promise.resolve(cached.snapshot);
+	}
+	const existing = capabilityInFlight.get(key);
+	if (existing) return existing;
+
+	const probe = probeAgentCapability(config, now, key, options.signal).finally(
+		() => {
+			if (capabilityInFlight.get(key) === probe) {
+				capabilityInFlight.delete(key);
+			}
+		},
+	);
+	capabilityInFlight.set(key, probe);
+	return probe;
 }
 
 export function getCachedAgentCapability(
@@ -975,4 +1344,15 @@ export function getCachedAgentCapability(
 
 export function clearAgentCapabilityCache(): void {
 	capabilityCache.clear();
+	capabilityInFlight.clear();
+}
+
+export function clearAgentCapabilityCacheNamespace(namespace: string): void {
+	const prefix = `${namespace}:`;
+	for (const key of capabilityCache.keys()) {
+		if (key.startsWith(prefix)) capabilityCache.delete(key);
+	}
+	for (const key of capabilityInFlight.keys()) {
+		if (key.startsWith(prefix)) capabilityInFlight.delete(key);
+	}
 }

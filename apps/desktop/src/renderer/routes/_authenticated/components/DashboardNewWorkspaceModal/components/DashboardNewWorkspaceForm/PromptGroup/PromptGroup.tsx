@@ -1,10 +1,9 @@
 import {
-	AGENT_EFFORT_SUPPORT,
 	getAgentContextWindowSupport,
-	getAgentEffortSupport,
 	getAgentModelSupport,
 	getAgentModeSupport,
 	getAgentSpeedSupport,
+	resolveAgentEffortSupport,
 } from "@superset/shared/agent-models";
 import { sanitizeUserBranchName } from "@superset/shared/workspace-launch";
 import {
@@ -41,7 +40,10 @@ import { useAgentModelPreference } from "renderer/hooks/useAgentModelPreference"
 import { useAgentModePreference } from "renderer/hooks/useAgentModePreference";
 import { useAgentSpeedPreference } from "renderer/hooks/useAgentSpeedPreference";
 import { useRelayUrl } from "renderer/hooks/useRelayUrl";
-import { useV2AgentChoices } from "renderer/hooks/useV2AgentChoices";
+import {
+	getCapabilityDisplayInventory,
+	useV2AgentChoices,
+} from "renderer/hooks/useV2AgentChoices";
 import { PLATFORM } from "renderer/hotkeys";
 import { authClient } from "renderer/lib/auth-client";
 import { showHostServiceUnavailableToast } from "renderer/lib/host-service-unavailable";
@@ -208,25 +210,27 @@ export function PromptGroup({
 		return agent?.presetId ?? agent?.iconId ?? null;
 	}, [v2Agents, selectedAgent]);
 	const selectedCapability = capabilitiesByAgentId.get(selectedAgent);
+	const displayInventory = getCapabilityDisplayInventory(selectedCapability);
 	const modelSupport = useMemo(() => {
 		if (!selectedPresetId) return undefined;
 		const support = getAgentModelSupport(selectedPresetId);
-		if (!support || !selectedCapability?.models.length) return support;
-		const runtimeDefault = selectedCapability.models.some(
+		const models = displayInventory?.models ?? [];
+		if (!support || !models.length) return support;
+		const runtimeDefault = models.some(
 			(model) => model.id === support.defaultModelId,
 		)
 			? support.defaultModelId
-			: selectedCapability.models[0]?.id;
+			: models[0]?.id;
 		return {
 			...support,
 			defaultModelId: runtimeDefault,
-			models: selectedCapability.models.map(({ id, label, provider }) => ({
+			models: models.map(({ id, label, provider }) => ({
 				id,
 				label,
 				provider,
 			})),
 		};
-	}, [selectedCapability, selectedPresetId]);
+	}, [displayInventory, selectedPresetId]);
 	const { selectedModel, setSelectedModel } = useAgentModelPreference(
 		MODEL_STORAGE_KEY,
 		modelSupport ? selectedPresetId : null,
@@ -238,26 +242,22 @@ export function PromptGroup({
 		modelSupport?.models[0]?.id;
 	const effortSupport = useMemo(() => {
 		if (!selectedPresetId) return undefined;
-		const runtimeModel = selectedCapability?.models.find(
+		const runtimeModel = displayInventory?.models.find(
 			(model) => model.id === resolvedModel,
 		);
-		if (selectedCapability?.modelSource !== "runtime") {
-			return getAgentEffortSupport(selectedPresetId, resolvedModel);
+		if (displayInventory?.modelSource !== "runtime") {
+			return resolveAgentEffortSupport(
+				selectedPresetId,
+				resolvedModel,
+				undefined,
+			);
 		}
-		if (runtimeModel?.efforts === undefined) {
-			return getAgentEffortSupport(selectedPresetId, resolvedModel);
-		}
-		if (runtimeModel.efforts.length === 0) return undefined;
-		const transport = AGENT_EFFORT_SUPPORT.find(
-			(support) => support.presetId === selectedPresetId,
+		return resolveAgentEffortSupport(
+			selectedPresetId,
+			resolvedModel,
+			runtimeModel?.reasoning,
 		);
-		if (!transport) return undefined;
-		return {
-			...transport,
-			defaultEffortId: runtimeModel.defaultEffortId,
-			efforts: runtimeModel.efforts,
-		};
-	}, [resolvedModel, selectedCapability, selectedPresetId]);
+	}, [displayInventory, resolvedModel, selectedPresetId]);
 	const { selectedEffort, setSelectedEffort } = useAgentEffortPreference(
 		EFFORT_STORAGE_KEY,
 		effortSupport ? selectedPresetId : null,

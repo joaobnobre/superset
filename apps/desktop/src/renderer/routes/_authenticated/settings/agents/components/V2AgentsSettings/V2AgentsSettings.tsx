@@ -10,6 +10,10 @@ import { useNavigate } from "@tanstack/react-router";
 import { Bot } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
+	type HostAgentQueryInvalidation,
+	invalidateHostAgentQueries,
+} from "renderer/hooks/useV2AgentChoices";
+import {
 	V2_AGENT_CONFIGS_QUERY_KEY as QUERY_KEY,
 	useV2AgentConfigs,
 } from "renderer/hooks/useV2AgentConfigs";
@@ -86,9 +90,9 @@ export function V2AgentsSettings({
 	const queryKey = [...QUERY_KEY, activeHostUrl] as const;
 	const queryFamily = { queryKey: QUERY_KEY };
 
-	const invalidate = () => {
-		void queryClient.invalidateQueries(queryFamily);
-		void queryClient.refetchQueries(queryFamily);
+	const invalidate = (scope: HostAgentQueryInvalidation) => {
+		if (!activeHostUrl) return;
+		invalidateHostAgentQueries(queryClient, activeHostUrl, scope);
 	};
 
 	const updateCachedConfig = (updated: HostAgentConfig) => {
@@ -154,7 +158,7 @@ export function V2AgentsSettings({
 		},
 		onSuccess: (added) => {
 			setIsCreating(false);
-			invalidate();
+			invalidate("config-and-capabilities");
 			if (added?.id) {
 				setSelectedAgentId(added.id);
 				insertLinkedTerminalPreset(collections, added);
@@ -179,7 +183,7 @@ export function V2AgentsSettings({
 		},
 		onSuccess: (added) => {
 			setIsCreating(false);
-			invalidate();
+			invalidate("config-and-capabilities");
 			if (added?.id) {
 				setSelectedAgentId(added.id);
 				insertLinkedTerminalPreset(collections, added);
@@ -225,7 +229,7 @@ export function V2AgentsSettings({
 			}
 			toast.error(err instanceof Error ? err.message : "Failed to reorder");
 		},
-		onSettled: () => invalidate(),
+		onSettled: () => invalidate("config"),
 	});
 
 	const resetMutation = useMutation({
@@ -245,7 +249,7 @@ export function V2AgentsSettings({
 			setIsCreating(false);
 			setSelectedAgentId(null);
 			void navigate({ to: "/settings/agents" });
-			invalidate();
+			invalidate("config-and-capabilities");
 		},
 		onError: (err) =>
 			toast.error(err instanceof Error ? err.message : "Failed to reset"),
@@ -344,15 +348,15 @@ export function V2AgentsSettings({
 							DESCRIPTION_BY_PRESET_ID.get(selectedAgent.presetId) ??
 							"Terminal agent launch configuration"
 						}
-						onChanged={(updated) => {
+						onChanged={(updated, invalidation) => {
 							updateCachedConfig(updated);
 							syncLinkedPresetSnapshots(updated);
-							invalidate();
+							invalidate(invalidation);
 						}}
 						onDeleted={() => {
 							setSelectedAgentId(null);
 							void navigate({ to: "/settings/agents" });
-							invalidate();
+							invalidate("config-and-capabilities");
 						}}
 					/>
 				) : (
