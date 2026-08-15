@@ -590,6 +590,7 @@ describe("agent capabilities", () => {
 	test("finishes Pi discovery as soon as its long-lived RPC returns models", async () => {
 		const directory = await mkdtemp(join(tmpdir(), "superset-pi-probe-"));
 		const executable = join(directory, "pi-test");
+		const argsPath = join(directory, "pi-args");
 		const response = JSON.stringify({
 			type: "response",
 			command: "get_available_models",
@@ -607,7 +608,7 @@ describe("agent capabilities", () => {
 		});
 		await writeFile(
 			executable,
-			`#!/bin/sh\nprintf '%s\\n' '${response}'\nwhile :; do sleep 1; done\n`,
+			`#!/bin/sh\nprintf '%s\\n' "$*" > '${argsPath}'\nprintf '%s\\n' '${response}'\nwhile :; do sleep 1; done\n`,
 		);
 		await chmod(executable, 0o755);
 		try {
@@ -633,6 +634,7 @@ describe("agent capabilities", () => {
 					},
 				],
 			});
+			expect(await readFile(argsPath, "utf8")).toContain("--no-extensions");
 		} finally {
 			await rm(directory, { recursive: true, force: true });
 		}

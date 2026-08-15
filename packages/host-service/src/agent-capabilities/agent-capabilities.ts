@@ -1044,7 +1044,10 @@ async function discoverModels(
 	if (config.presetId === "pi") {
 		let result = await runCommand(
 			executable,
-			["--mode", "rpc", "--no-session"],
+			// Extensions are useful in interactive sessions but can initialize
+			// arbitrary user code before the RPC server begins accepting requests.
+			// Discovery only needs Pi's configured model registry.
+			["--mode", "rpc", "--no-session", "--no-extensions"],
 			env,
 			PROBE_TIMEOUT_MS,
 			'{"type":"get_available_models"}\n',
