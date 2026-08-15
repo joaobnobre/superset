@@ -3,7 +3,9 @@ import { initTRPC, TRPCError } from "@trpc/server";
 import superjson from "superjson";
 import type { HostServiceContext } from "../types";
 import {
+	type AgentLaunchCapabilityWire,
 	type DeleteInProgressCause,
+	isAgentLaunchCapabilityCause,
 	isDeleteInProgressCause,
 	isProjectNotSetupCause,
 	isTeardownFailureCause,
@@ -53,6 +55,10 @@ const t = initTRPC
 				isDeleteInProgressCause(error.cause)
 					? { kind: "DELETE_IN_PROGRESS" }
 					: undefined;
+			const agentLaunchCapability: AgentLaunchCapabilityWire | undefined =
+				isAgentLaunchCapabilityCause(error.cause)
+					? { kind: error.cause.kind }
+					: undefined;
 			return {
 				...shape,
 				data: {
@@ -60,6 +66,7 @@ const t = initTRPC
 					teardownFailure,
 					projectNotSetup,
 					deleteInProgress,
+					agentLaunchCapability,
 				},
 			};
 		},

@@ -2,6 +2,7 @@
  * Cross-cutting error shapes surfaced via the tRPC error formatter.
  * Lives here (not in a router) to avoid circular imports with `trpc/index.ts`.
  */
+import { z } from "zod";
 
 export interface TeardownFailureCause {
 	kind: "TEARDOWN_FAILED";
@@ -62,4 +63,36 @@ export function isDeleteInProgressCause(
 		"kind" in value &&
 		(value as { kind: unknown }).kind === "DELETE_IN_PROGRESS"
 	);
+}
+
+export const AGENT_LAUNCH_CAPABILITY_ERROR_KINDS = [
+	"authentication_required",
+	"config_changed",
+	"expired_lease",
+	"missing_executable",
+	"retired_model",
+	"selection_mismatch",
+	"unavailable",
+	"unsupported_trait",
+] as const;
+
+export type AgentLaunchCapabilityErrorKind =
+	(typeof AGENT_LAUNCH_CAPABILITY_ERROR_KINDS)[number];
+
+export interface AgentLaunchCapabilityWire {
+	kind: AgentLaunchCapabilityErrorKind;
+}
+
+const agentLaunchCapabilityWireSchema = z.object({
+	kind: z.enum(AGENT_LAUNCH_CAPABILITY_ERROR_KINDS),
+});
+
+/**
+ * Detects a launch-capability cause on a TRPCError. Matches the stable
+ * `kind` rather than `instanceof` so wrapped/serialized causes still work.
+ */
+export function isAgentLaunchCapabilityCause(
+	value: unknown,
+): value is { kind: AgentLaunchCapabilityErrorKind } {
+	return agentLaunchCapabilityWireSchema.safeParse(value).success;
 }

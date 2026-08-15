@@ -6,20 +6,23 @@ import {
 	type HostAgentPreset,
 } from "@superset/shared/host-agent-presets";
 import { TRPCError } from "@trpc/server";
-import { asc, eq, inArray } from "drizzle-orm";
+import { asc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
-import {
-	type AgentCapabilitySnapshot,
-	inspectAgentCapability,
-} from "../../../agent-capabilities/agent-capabilities";
+import type { RevisionedAgentCapabilityConfig } from "../../../agent-capabilities/capability-refresh-service";
 import type { HostDb } from "../../../db";
-import { hostAgentConfigs } from "../../../db/schema";
+import {
+	hostAgentCapabilitySnapshots,
+	hostAgentConfigs,
+} from "../../../db/schema";
 import { protectedProcedure, router } from "../../index";
-
-const promptTransportSchema = z.enum(["argv", "stdin"]);
-
-const argvSchema = z.array(z.string());
-const envSchema = z.record(z.string(), z.string());
+import {
+	agentArgvSchema,
+	agentEnvSchema,
+	parseAgentArgv,
+	parseAgentEnv,
+	parsePromptTransport,
+	promptTransportSchema,
+} from "./agent-config-parsers";
 
 export interface HostAgentConfig {
 	id: string;
@@ -49,41 +52,8 @@ interface HostAgentConfigRow {
 	promptArgsJson: string;
 	resumeArgsJson: string;
 	envJson: string;
+	capabilityRevision: number;
 	displayOrder: number;
-}
-
-function parseArgv(value: string): string[] {
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(value);
-	} catch {
-		return [];
-	}
-	if (
-		!Array.isArray(parsed) ||
-		parsed.some((item) => typeof item !== "string")
-	) {
-		return [];
-	}
-	return parsed as string[];
-}
-
-function parseEnv(value: string): Record<string, string> {
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(value);
-	} catch {
-		return {};
-	}
-	if (
-		parsed === null ||
-		typeof parsed !== "object" ||
-		Array.isArray(parsed) ||
-		Object.values(parsed).some((item) => typeof item !== "string")
-	) {
-		return {};
-	}
-	return parsed as Record<string, string>;
 }
 
 function toOutput(row: HostAgentConfigRow): HostAgentConfig {
@@ -93,11 +63,11 @@ function toOutput(row: HostAgentConfigRow): HostAgentConfig {
 		iconId: row.iconId ?? null,
 		label: row.label,
 		command: row.command,
-		args: parseArgv(row.argsJson),
-		promptTransport: row.promptTransport as PromptTransport,
-		promptArgs: parseArgv(row.promptArgsJson),
-		resumeArgs: parseArgv(row.resumeArgsJson),
-		env: parseEnv(row.envJson),
+		args: parseAgentArgv(row.argsJson),
+		promptTransport: parsePromptTransport(row.promptTransport),
+		promptArgs: parseAgentArgv(row.promptArgsJson),
+		resumeArgs: parseAgentArgv(row.resumeArgsJson),
+		env: parseAgentEnv(row.envJson),
 		order: row.displayOrder,
 	};
 }
@@ -140,6 +110,28 @@ function seedDefaultsIfEmpty(db: HostDb): HostAgentConfigRow[] {
 	return listOrdered(db);
 }
 
+function toCapabilityConfig(
+	row: HostAgentConfigRow,
+): RevisionedAgentCapabilityConfig {
+	return {
+		id: row.id,
+		presetId: row.presetId,
+		command: row.command,
+		env: parseAgentEnv(row.envJson),
+		configRevision: row.capabilityRevision,
+	};
+}
+
+function envsEqual(leftJson: string, right: Record<string, string>): boolean {
+	const left = Object.entries(parseAgentEnv(leftJson)).sort(([a], [b]) =>
+		a.localeCompare(b),
+	);
+	const normalizedRight = Object.entries(right).sort(([a], [b]) =>
+		a.localeCompare(b),
+	);
+	return JSON.stringify(left) === JSON.stringify(normalizedRight);
+}
+
 // An icon override is either a built-in icon key ("claude") or an uploaded
 // `data:` image URI. Capped so an oversized upload can't bloat the per-machine
 // SQLite DB — the client downscales images before sending.
@@ -152,11 +144,11 @@ const updatePatchSchema = z
 	.object({
 		label: z.string().trim().min(1).optional(),
 		command: z.string().trim().min(1).optional(),
-		args: argvSchema.optional(),
+		args: agentArgvSchema.optional(),
 		promptTransport: promptTransportSchema.optional(),
-		promptArgs: argvSchema.optional(),
-		resumeArgs: argvSchema.optional(),
-		env: envSchema.optional(),
+		promptArgs: agentArgvSchema.optional(),
+		resumeArgs: agentArgvSchema.optional(),
+		env: agentEnvSchema.optional(),
 		iconId: iconIdPatchSchema.optional(),
 	})
 	.refine(
@@ -175,12 +167,12 @@ const updatePatchSchema = z
 const addInputSchema = z.object({
 	label: z.string().trim().min(1),
 	command: z.string().trim().min(1),
-	args: argvSchema,
+	args: agentArgvSchema,
 	promptTransport: promptTransportSchema,
-	promptArgs: argvSchema,
+	promptArgs: agentArgvSchema,
 	// Defaulted so an older desktop client that doesn't send it can still add.
-	resumeArgs: argvSchema.default([]),
-	env: envSchema,
+	resumeArgs: agentArgvSchema.default([]),
+	env: agentEnvSchema,
 	presetId: z.string().trim().min(1).optional(),
 	iconId: iconIdSchema.optional(),
 });
@@ -195,39 +187,31 @@ export const agentConfigsRouter = router({
 		return rows.map(toOutput);
 	}),
 
-	/**
-	 * Host-authoritative availability and model snapshot. Every configured
-	 * agent is probed independently so one slow or broken CLI cannot suppress
-	 * the providers that are ready.
-	 */
-	capabilities: protectedProcedure.query(async ({ ctx }) => {
-		const configs = seedDefaultsIfEmpty(ctx.db).map(toOutput);
-		return Promise.all(
-			configs.map(async (config): Promise<AgentCapabilitySnapshot> => {
-				try {
-					return await inspectAgentCapability({
-						id: config.id,
-						presetId: config.presetId,
-						command: config.command,
-						env: config.env,
-					});
-				} catch {
-					return {
-						agentId: config.id,
-						presetId: config.presetId,
-						status: "unavailable",
-						installed: false,
-						auth: "unknown",
-						version: null,
-						modelSource: "none",
-						models: [],
-						message: "Agent capability probe failed",
-						checkedAt: new Date().toISOString(),
-					};
-				}
-			}),
-		);
+	/** Read persisted capability snapshots without spawning an agent process. */
+	listCapabilitySnapshots: protectedProcedure.query(({ ctx }) => {
+		seedDefaultsIfEmpty(ctx.db);
+		return ctx.capabilityRefresh.readPersisted();
 	}),
+
+	/** Refresh only requested stale agents. Concurrent calls share each probe. */
+	refreshCapabilities: protectedProcedure
+		.input(
+			z
+				.object({
+					agentIds: z.array(z.string().min(1)).optional(),
+					force: z.boolean().optional(),
+				})
+				.optional(),
+		)
+		.mutation(async ({ ctx, input }) => {
+			const requestedIds = input?.agentIds ? new Set(input.agentIds) : null;
+			const configs = seedDefaultsIfEmpty(ctx.db)
+				.filter((row) => requestedIds === null || requestedIds.has(row.id))
+				.map(toCapabilityConfig);
+			return ctx.capabilityRefresh.refreshCapabilities(configs, {
+				force: input?.force,
+			});
+		}),
 
 	/**
 	 * Insert a configured host-agent row. Callers pass the full launch shape;
@@ -297,6 +281,11 @@ export const agentConfigsRouter = router({
 					message: `Host agent config not found: ${input.id}`,
 				});
 			}
+			const discoveryIdentityChanged =
+				(input.patch.command !== undefined &&
+					input.patch.command !== existing.command) ||
+				(input.patch.env !== undefined &&
+					!envsEqual(existing.envJson, input.patch.env));
 			const update: Partial<typeof hostAgentConfigs.$inferInsert> = {
 				updatedAt: Date.now(),
 			};
@@ -314,11 +303,24 @@ export const agentConfigsRouter = router({
 			if (input.patch.env !== undefined)
 				update.envJson = JSON.stringify(input.patch.env);
 			if (input.patch.iconId !== undefined) update.iconId = input.patch.iconId;
-			ctx.db
-				.update(hostAgentConfigs)
-				.set(update)
-				.where(eq(hostAgentConfigs.id, input.id))
-				.run();
+			ctx.db.transaction((tx) => {
+				tx.update(hostAgentConfigs)
+					.set(
+						discoveryIdentityChanged
+							? {
+									...update,
+									capabilityRevision: sql`${hostAgentConfigs.capabilityRevision} + 1`,
+								}
+							: update,
+					)
+					.where(eq(hostAgentConfigs.id, input.id))
+					.run();
+				if (discoveryIdentityChanged) {
+					tx.delete(hostAgentCapabilitySnapshots)
+						.where(eq(hostAgentCapabilitySnapshots.agentId, input.id))
+						.run();
+				}
+			});
 			const updated = ctx.db
 				.select()
 				.from(hostAgentConfigs)
@@ -361,21 +363,26 @@ export const agentConfigsRouter = router({
 				});
 			}
 
-			ctx.db
-				.update(hostAgentConfigs)
-				.set({
-					iconId: null,
-					label: preset.label,
-					command: preset.command,
-					argsJson: JSON.stringify(preset.args),
-					promptTransport: preset.promptTransport,
-					promptArgsJson: JSON.stringify(preset.promptArgs),
-					resumeArgsJson: JSON.stringify(preset.resumeArgs),
-					envJson: JSON.stringify(preset.env),
-					updatedAt: Date.now(),
-				})
-				.where(eq(hostAgentConfigs.id, input.id))
-				.run();
+			ctx.db.transaction((tx) => {
+				tx.update(hostAgentConfigs)
+					.set({
+						iconId: null,
+						label: preset.label,
+						command: preset.command,
+						argsJson: JSON.stringify(preset.args),
+						promptTransport: preset.promptTransport,
+						promptArgsJson: JSON.stringify(preset.promptArgs),
+						resumeArgsJson: JSON.stringify(preset.resumeArgs),
+						envJson: JSON.stringify(preset.env),
+						capabilityRevision: sql`${hostAgentConfigs.capabilityRevision} + 1`,
+						updatedAt: Date.now(),
+					})
+					.where(eq(hostAgentConfigs.id, input.id))
+					.run();
+				tx.delete(hostAgentCapabilitySnapshots)
+					.where(eq(hostAgentCapabilitySnapshots.agentId, input.id))
+					.run();
+			});
 
 			const restored = ctx.db
 				.select()

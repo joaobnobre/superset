@@ -47,8 +47,8 @@ function PromptInputResetSync() {
 export function DashboardNewWorkspaceModal() {
 	const { activeHostUrl } = useLocalHostService();
 	// This component stays mounted for the authenticated shell. Warm the local
-	// host snapshot before the dialog opens so its first paint has real agents.
-	useV2AgentChoices(activeHostUrl);
+	// host snapshot before the dialog opens without probing agent CLIs.
+	useV2AgentChoices(activeHostUrl, { refresh: false });
 	const isOpen = useNewWorkspaceModalOpen();
 	const closeModal = useCloseNewWorkspaceModal();
 	const preSelectedProjectId = usePreSelectedProjectId();

@@ -19,6 +19,8 @@ import {
 	LuEraser,
 	LuPower,
 } from "react-icons/lu";
+import { useWorkspaceHostUrl } from "renderer/hooks/host-service/useWorkspaceHostUrl";
+import { invalidateCapabilitiesOnLaunchError } from "renderer/hooks/useV2AgentChoices";
 import { useHotkeyDisplay } from "renderer/hotkeys";
 import { FileIcon } from "renderer/lib/fileIcons";
 import { getBaseName } from "renderer/lib/pathBasename";
@@ -28,6 +30,7 @@ import {
 } from "renderer/lib/terminal/confirm-close-terminals";
 import { consumeTerminalBackgroundIntent } from "renderer/lib/terminal/terminal-background-intents";
 import { terminalRuntimeRegistry } from "renderer/lib/terminal/terminal-runtime-registry";
+import { electronQueryClient } from "renderer/providers/ElectronTRPCProvider";
 import { useWorkspace } from "renderer/routes/_authenticated/_dashboard/v2-workspace/providers/WorkspaceProvider";
 import { useCollections } from "renderer/routes/_authenticated/providers/CollectionsProvider";
 import { getV2NotificationSourcesForPane } from "renderer/stores/v2-notifications";
@@ -119,6 +122,7 @@ export function usePaneRegistry({
 }: UsePaneRegistryOptions): PaneRegistry<PaneViewerData> {
 	const { workspace } = useWorkspace();
 	const workspaceId = workspace.id;
+	const hostUrl = useWorkspaceHostUrl(workspaceId);
 	const isChatV3Enabled = useFeatureFlagEnabled(FEATURE_FLAGS.CHAT_V3) ?? false;
 	const runAgent = workspaceTrpc.agents.run.useMutation();
 	const collections = useCollections();
@@ -199,13 +203,18 @@ export function usePaneRegistry({
 				}
 				return { terminalId };
 			} catch (error) {
+				invalidateCapabilitiesOnLaunchError(
+					electronQueryClient,
+					hostUrl,
+					error,
+				);
 				const description =
 					error instanceof Error ? error.message : "Unknown error";
 				toast.error("Couldn't start agent session", { description });
 				return null;
 			}
 		},
-		[runAgent, store, workspaceId],
+		[hostUrl, runAgent, store, workspaceId],
 	);
 
 	return useMemo<PaneRegistry<PaneViewerData>>(
