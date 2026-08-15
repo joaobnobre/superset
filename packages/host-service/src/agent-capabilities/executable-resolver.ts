@@ -116,28 +116,32 @@ export async function resolveAgentExecutable(
 				.split(pathDelimiter)
 				.filter(Boolean)
 				.flatMap((directory) => names.map((name) => join(directory, name)));
-	const executableCandidates: string[] = [];
-	for (const candidate of candidates) {
-		if (await isExecutable(candidate)) executableCandidates.push(candidate);
-	}
-	if (executableCandidates.length === 0) return null;
-
-	const firstCandidate = executableCandidates[0];
-	if (!firstCandidate) return null;
 	if (explicit) {
-		return { path: firstCandidate, source: "explicit" };
-	}
-	if (await isNativeExecutable(firstCandidate)) {
-		return { path: firstCandidate, source: "path" };
-	}
-	if (!(await isPackageManagerWrapper(firstCandidate))) {
-		return { path: firstCandidate, source: "path" };
+		for (const candidate of candidates) {
+			if (await isExecutable(candidate)) {
+				return { path: candidate, source: "explicit" };
+			}
+		}
+		return null;
 	}
 
-	for (const candidate of executableCandidates.slice(1)) {
+	let wrapperPath: string | null = null;
+	for (const candidate of candidates) {
+		if (!(await isExecutable(candidate))) continue;
+		if (wrapperPath !== null) {
+			if (await isNativeExecutable(candidate)) {
+				return { path: candidate, source: "path" };
+			}
+			continue;
+		}
 		if (await isNativeExecutable(candidate)) {
 			return { path: candidate, source: "path" };
 		}
+		if (!(await isPackageManagerWrapper(candidate))) {
+			return { path: candidate, source: "path" };
+		}
+		wrapperPath = candidate;
 	}
-	return { path: firstCandidate, source: "wrapper" };
+	if (wrapperPath === null) return null;
+	return { path: wrapperPath, source: "wrapper" };
 }

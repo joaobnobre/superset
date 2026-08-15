@@ -34,6 +34,9 @@ local CLI snapshot cache.
   automation, with the same async capability preflight.
 - [x] Resolve installed executables from explicit configuration and `PATH`
   without reading npm, Bun, pnpm, or other package-manager caches.
+- [x] Keep executable presence as a filesystem-only first stage: stop at the
+  first ordinary PATH match, scan farther only to bypass a recognized package
+  wrapper, and never spawn a missing CLI.
 - [x] Validate the cache-first lifecycle in the real desktop app on Linux.
 
 ## Baseline and prerequisite ownership
@@ -387,6 +390,13 @@ Use an ordered, testable resolver:
 2. Native executable found on the terminal's effective `PATH`.
 3. A later native executable on `PATH` when a recognized wrapper appears first.
 4. The original configured wrapper with a provider-appropriate timeout.
+
+This presence stage follows the same useful boundary as Orca's CLI detection:
+filesystem/PATH resolution is separate from provider-specific capability
+discovery. Superset retains the deeper second stage because the picker must know
+host-specific authentication, models, and traits. Only a resolved executable may
+reach that stage; missing agents produce health observations without spawning a
+process.
 
 Keep resolver metadata such as source, detected version, and in-memory path for
 diagnostics. Do not persist the resolved path. Never scan every package cache for
