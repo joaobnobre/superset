@@ -53,6 +53,7 @@ import { ProjectPickerPill } from "./components/ProjectPickerPill";
 import { PromptHistoryCommand } from "./components/PromptHistoryCommand";
 import { UploadingAttachmentPill } from "./components/UploadingAttachmentPill";
 import { WorkspaceAgentTraitsPicker } from "./components/WorkspaceAgentTraitsPicker";
+import { getAgentSelectionBlocker } from "./getAgentSelectionBlocker";
 import { useBranchPickerController } from "./hooks/useBranchPickerController";
 import { useLinkedContext } from "./hooks/useLinkedContext";
 import { useSubmitWorkspace } from "./hooks/useSubmitWorkspace";
@@ -145,6 +146,10 @@ export function PromptGroup({
 			},
 		});
 	}, [closeModal, draft.hostId, machineId, navigate, selectedProject?.id]);
+	const handleConfigureAgents = useCallback(() => {
+		closeModal();
+		void navigate({ to: "/settings/agents" });
+	}, [closeModal, navigate]);
 	const {
 		baseBranch,
 		hostId,
@@ -191,6 +196,16 @@ export function PromptGroup({
 			validAgents: ["none", ...selectableAgentIds],
 			agentsReady: v2AgentsFetched,
 		});
+	const agentSelectionBlocker = getAgentSelectionBlocker({
+		isFetched: v2AgentsFetched,
+		selectableAgentIds,
+		selectedAgent,
+	});
+	const noSelectableAgents = v2AgentsFetched && selectableAgentIds.length === 0;
+	const agentPickerDisabled = !v2AgentsFetched || noSelectableAgents;
+	let agentSelectPlaceholder = "Select agent";
+	if (!v2AgentsFetched) agentSelectPlaceholder = "Loading agents...";
+	else if (noSelectableAgents) agentSelectPlaceholder = "No agents available";
 
 	// ── Model picker (per agent preset) ──────────────────────────────
 	// `presetId` is stable even when a host config uses a custom icon.
@@ -319,6 +334,7 @@ export function PromptGroup({
 	const { otherHosts } = useWorkspaceHostOptions();
 	const submitBlocker = useMemo<string | null>(() => {
 		if (!projectId && !draft.isSession) return "Select a project";
+		if (agentSelectionBlocker) return agentSelectionBlocker;
 		const selectedHostId = draft.hostId ?? machineId;
 		if (!selectedHostId) return "No active host";
 		if (selectedHostId !== machineId) {
@@ -331,6 +347,7 @@ export function PromptGroup({
 	}, [
 		projectId,
 		draft.isSession,
+		agentSelectionBlocker,
 		draft.hostId,
 		machineId,
 		activeHostUrl,
@@ -574,15 +591,25 @@ export function PromptGroup({
 						<AgentSelect<WorkspaceCreateAgent>
 							agents={v2Agents}
 							value={selectedAgent}
-							placeholder={
-								v2AgentsFetched ? "Select agent" : "Loading agents..."
-							}
-							disabled={!v2AgentsFetched}
+							placeholder={agentSelectPlaceholder}
+							disabled={agentPickerDisabled}
 							onValueChange={setSelectedAgent}
 							onBeforeConfigureAgents={closeModal}
 							triggerClassName={`${PILL_BUTTON_CLASS} px-1.5 gap-1 text-foreground w-auto max-w-[160px]`}
 							iconClassName="size-3 object-contain"
 						/>
+						{noSelectableAgents && (
+							<Button
+								type="button"
+								variant="ghost"
+								size="sm"
+								className={`${PILL_BUTTON_CLASS} px-1.5 gap-1 text-muted-foreground`}
+								onClick={handleConfigureAgents}
+							>
+								<Settings2Icon className="size-3" />
+								Configure agents
+							</Button>
+						)}
 						{modelSupport && (
 							<AgentModelSelect
 								models={modelSupport.models}
@@ -669,7 +696,7 @@ export function PromptGroup({
 						/>
 						<PromptInputSubmit
 							className="size-[22px] rounded-full border border-transparent bg-foreground/10 shadow-none p-[5px] hover:bg-foreground/20"
-							disabled={needsSetup}
+							disabled={needsSetup || !!agentSelectionBlocker}
 							onClick={(e) => {
 								e.preventDefault();
 								handleSubmit();

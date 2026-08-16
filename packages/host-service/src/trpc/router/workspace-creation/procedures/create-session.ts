@@ -67,10 +67,6 @@ function claimedSessionNames(ctx: HostServiceContext): string[] {
 export const createSession = protectedProcedure
 	.input(createSessionInputSchema)
 	.mutation(async ({ ctx, input }) => {
-		for (const launch of input.agents ?? []) {
-			await validateAgentLaunchSelection(ctx.db, launch);
-		}
-
 		// Idempotency: a retry carrying the same optimistic id must return the
 		// existing row instead of allocating a second folder and then dying on
 		// the primary key (which would leak the freshly-created directory).
@@ -83,6 +79,10 @@ export const createSession = protectedProcedure
 					agents: [],
 				};
 			}
+		}
+
+		for (const launch of input.agents ?? []) {
+			await validateAgentLaunchSelection(ctx.db, launch);
 		}
 
 		// AI title, same contract as `workspaces.create`: only when the

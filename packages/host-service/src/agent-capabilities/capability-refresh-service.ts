@@ -212,7 +212,7 @@ async function refreshCapabilityUncoalesced(
 			agentId: config.id,
 			presetId: config.presetId,
 			status: "unavailable",
-			installed: previous?.installed ?? true,
+			installed: previous?.installed ?? null,
 			auth: "unknown",
 			version: null,
 			modelSource: "none",

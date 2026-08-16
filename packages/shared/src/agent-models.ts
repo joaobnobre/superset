@@ -298,6 +298,10 @@ export interface AgentContextWindowSupport {
 	contextWindows: AgentModelOption[];
 }
 
+interface AgentContextWindowEnv {
+	CLAUDE_CODE_DISABLE_1M_CONTEXT?: "0" | "1";
+}
+
 function createClaudeContextWindowSupport(
 	defaultContextWindowId: "200k" | "1m",
 ): AgentContextWindowSupport {
@@ -798,6 +802,28 @@ export function buildAgentModelArgs(
 			? `${model}[1m]`
 			: model;
 	return [support.modelFlag, resolvedModel];
+}
+
+/** Environment overrides required to honor an explicit context-window choice. */
+export function buildAgentContextWindowEnv(
+	presetId: string,
+	model: string | undefined,
+	contextWindow?: string,
+): AgentContextWindowEnv {
+	if (
+		presetId !== "claude" ||
+		!model ||
+		(contextWindow !== "200k" && contextWindow !== "1m")
+	) {
+		return {};
+	}
+	const support = getAgentContextWindowSupport(presetId, model);
+	if (!support?.contextWindows.some((option) => option.id === contextWindow)) {
+		return {};
+	}
+	return {
+		CLAUDE_CODE_DISABLE_1M_CONTEXT: contextWindow === "200k" ? "1" : "0",
+	};
 }
 
 /**

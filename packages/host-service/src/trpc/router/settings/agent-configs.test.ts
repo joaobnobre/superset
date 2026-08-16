@@ -550,6 +550,7 @@ describe("agentConfigsRouter", () => {
 					.get()?.configRevision,
 			).toBe(afterCommand?.capabilityRevision);
 
+			expect(afterCommand).toBeDefined();
 			if (!afterCommand) return;
 			insertHealthSnapshot(db, afterCommand);
 			await caller.update({
@@ -572,6 +573,7 @@ describe("agentConfigsRouter", () => {
 					.get()?.configRevision,
 			).toBe(afterArgs?.capabilityRevision);
 
+			expect(afterArgs).toBeDefined();
 			if (!afterArgs) return;
 			insertHealthSnapshot(db, afterArgs);
 			await caller.update({

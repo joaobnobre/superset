@@ -52,7 +52,7 @@ export interface AgentCapabilitySnapshot {
 	agentId: string;
 	presetId: string;
 	status: AgentCapabilityStatus;
-	installed: boolean;
+	installed: boolean | null;
 	auth: "authenticated" | "unauthenticated" | "unknown";
 	version: string | null;
 	modelSource: AgentModelSource;
@@ -449,17 +449,17 @@ async function probeAuthentication(
 	);
 	const output = `${result.stdout}\n${result.stderr}`;
 	if (
-		result.exitCode === 0 &&
-		(/"loggedIn"\s*:\s*true/i.test(output) || /logged in/i.test(output))
-	) {
-		return "authenticated";
-	}
-	if (
 		/"loggedIn"\s*:\s*false|"success"\s*:\s*false[^\n]*"type"\s*:\s*"auth"|not logged in|authentication required|invalid or missing api key|run .*login/i.test(
 			output,
 		)
 	) {
 		return "unauthenticated";
+	}
+	if (
+		result.exitCode === 0 &&
+		(/"loggedIn"\s*:\s*true/i.test(output) || /logged in/i.test(output))
+	) {
+		return "authenticated";
 	}
 	return "unknown";
 }

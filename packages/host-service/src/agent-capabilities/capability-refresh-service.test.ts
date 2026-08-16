@@ -643,6 +643,33 @@ describe("capability refresh service", () => {
 		await service.dispose();
 	});
 
+	it("keeps installation unknown when the first probe throws", async () => {
+		const db = createTestDb();
+		const config = seedConfig(db);
+		const service = new CapabilityRefreshService(db);
+
+		const view = await service.refreshCapability(config, {
+			now: CHECKED_AT_MS,
+			probe: async () => {
+				throw new Error("Provider explosion");
+			},
+		});
+
+		expect(view).toMatchObject({
+			health: {
+				status: "unavailable",
+				installed: null,
+				errorKind: "process_failure",
+			},
+			inventory: null,
+			inventoryOrigin: "none",
+			healthOrigin: "live",
+		});
+		expect(listCapabilitySnapshots(db)[0]?.installed).toBeNull();
+
+		await service.dispose();
+	});
+
 	it("preserves cancellation safety during batch refresh when signal is aborted", async () => {
 		const db = createTestDb();
 		const agent1 = seedConfig(db, "agent-1");

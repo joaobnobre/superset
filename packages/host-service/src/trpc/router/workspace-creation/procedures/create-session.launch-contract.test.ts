@@ -11,6 +11,7 @@ import { workspacesRouter } from "../../workspaces/workspaces";
 
 const MIGRATIONS_FOLDER = resolve(import.meta.dir, "../../../../../drizzle");
 const CLAUDE_ID = "00000000-0000-0000-0000-00000000000a";
+const SESSION_ID = "22222222-2222-4222-8222-222222222222";
 
 function createTestDb(): HostDb {
 	const sqlite = new Database(":memory:");
@@ -47,6 +48,36 @@ function createCaller(db: HostDb) {
 }
 
 describe("createSession launch contract", () => {
+	it("returns an existing session before revalidating a retired model", async () => {
+		const db = createTestDb();
+		seedClaude(db);
+		db.insert(schema.workspaces)
+			.values({
+				id: SESSION_ID,
+				worktreePath: "/tmp/existing-session",
+				branch: "main",
+				name: "Existing session",
+				type: "session",
+			})
+			.run();
+
+		const result = await createCaller(db).createSession({
+			id: SESSION_ID,
+			agents: [
+				{
+					agent: "claude",
+					prompt: "do the thing",
+					model: "retired-model",
+				},
+			],
+		});
+
+		expect(result.workspace.id).toBe(SESSION_ID);
+		expect(result.workspace.name).toBe("Existing session");
+		expect(result.terminals).toEqual([]);
+		expect(result.agents).toEqual([]);
+	});
+
 	it("rejects a retired model before creating a session folder", async () => {
 		const db = createTestDb();
 		seedClaude(db);

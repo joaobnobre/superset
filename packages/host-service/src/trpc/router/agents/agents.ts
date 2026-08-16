@@ -1,6 +1,7 @@
 import {
 	type AgentCapabilityTrait,
 	type AgentModelOption,
+	buildAgentContextWindowEnv,
 	buildAgentEffortArgs,
 	buildAgentModeArgs,
 	buildAgentModelArgs,
@@ -611,8 +612,21 @@ export function buildTerminalAgentLaunch(
 		input.model,
 		validated.allowedModelIds,
 	);
+	const contextWindowEnv = buildAgentContextWindowEnv(
+		config.presetId,
+		input.model,
+		input.contextWindow,
+	);
+	const launchEnv = {
+		...config.env,
+		...modelEnv,
+	};
+	if (contextWindowEnv.CLAUDE_CODE_DISABLE_1M_CONTEXT !== undefined) {
+		launchEnv.CLAUDE_CODE_DISABLE_1M_CONTEXT =
+			contextWindowEnv.CLAUDE_CODE_DISABLE_1M_CONTEXT;
+	}
 	return {
-		fullCommand: `${envOverlayPrefix({ ...config.env, ...modelEnv })}${command}`,
+		fullCommand: `${envOverlayPrefix(launchEnv)}${command}`,
 		label: config.label,
 	};
 }

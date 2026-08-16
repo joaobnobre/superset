@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	AGENT_EFFORT_SUPPORT,
 	AGENT_MODEL_SUPPORT,
+	buildAgentContextWindowEnv,
 	buildAgentEffortArgs,
 	buildAgentModeArgs,
 	buildAgentModelArgs,
@@ -192,6 +193,27 @@ describe("buildAgentModelArgs", () => {
 		expect(buildAgentModelArgs("polygraph", undefined)).toEqual([]);
 		expect(buildAgentModelArgs("polygraph", "")).toEqual([]);
 		expect(buildAgentModelArgs("polygraph", "gemini")).toEqual([]);
+	});
+});
+
+describe("buildAgentContextWindowEnv", () => {
+	it("enforces an explicit 200k Claude context window", () => {
+		expect(
+			buildAgentContextWindowEnv("claude", "claude-opus-5", "200k"),
+		).toEqual({ CLAUDE_CODE_DISABLE_1M_CONTEXT: "1" });
+	});
+
+	it("re-enables 1m when the inherited environment disables it", () => {
+		expect(buildAgentContextWindowEnv("claude", "claude-opus-5", "1m")).toEqual(
+			{ CLAUDE_CODE_DISABLE_1M_CONTEXT: "0" },
+		);
+	});
+
+	it("does not override the environment for omitted or unsupported contexts", () => {
+		expect(buildAgentContextWindowEnv("claude", "claude-opus-5")).toEqual({});
+		expect(buildAgentContextWindowEnv("codex", "gpt-5.6-sol", "200k")).toEqual(
+			{},
+		);
 	});
 });
 

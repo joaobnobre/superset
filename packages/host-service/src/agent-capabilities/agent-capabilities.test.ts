@@ -681,6 +681,31 @@ describe("agent capabilities", () => {
 		}
 	});
 
+	test('does not treat "not logged in" as authenticated', async () => {
+		const directory = await mkdtemp(join(tmpdir(), "superset-claude-auth-"));
+		const executable = join(directory, "claude-test");
+		await writeFile(
+			executable,
+			'#!/bin/sh\n[ "$1" = "auth" ] && printf "not logged in\\n"\nexit 0\n',
+		);
+		await chmod(executable, 0o755);
+		try {
+			const snapshot = await inspectAgentCapability({
+				id: "claude-test",
+				presetId: "claude",
+				command: executable,
+				env: {},
+			});
+			expect(snapshot).toMatchObject({
+				status: "authentication_required",
+				installed: true,
+				auth: "unauthenticated",
+			});
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
 	test("does not pass Electron's Node mode into agent CLIs", async () => {
 		const directory = await mkdtemp(join(tmpdir(), "superset-agent-probe-"));
 		const executable = join(directory, "opencode-test");

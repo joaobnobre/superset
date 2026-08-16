@@ -462,6 +462,15 @@ describe("buildTerminalAgentLaunch", () => {
 	it("forwards a supported Claude context window in the model id", async () => {
 		const db = createTestDb();
 		const config = seedConfig(db);
+		db.update(schema.hostAgentConfigs)
+			.set({
+				envJson: JSON.stringify({
+					FOO: "bar",
+					CLAUDE_CODE_DISABLE_1M_CONTEXT: "1",
+				}),
+			})
+			.where(eq(schema.hostAgentConfigs.id, config.id))
+			.run();
 		const selection = { model: "claude-opus-5", contextWindow: "1m" };
 		const validated = await validateFromSnapshot(
 			db,
@@ -479,8 +488,32 @@ describe("buildTerminalAgentLaunch", () => {
 			validated,
 		);
 		expect(launch.fullCommand).toBe(
-			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--model' 'claude-opus-5[1m]' 'do the thing'",
+			"FOO='bar' CLAUDE_CODE_DISABLE_1M_CONTEXT='0' 'claude' '--dangerously-skip-permissions' '--model' 'claude-opus-5[1m]' 'do the thing'",
 		);
+	});
+
+	it("enforces a selected 200k Claude context window in the launch environment", async () => {
+		const db = createTestDb();
+		const config = seedConfig(db);
+		const selection = { model: "claude-opus-5", contextWindow: "200k" };
+		const validated = await validateFromSnapshot(
+			db,
+			{ agent: "claude", ...selection },
+			fallbackSnapshot(config),
+		);
+		const launch = buildTerminalAgentLaunch(
+			db,
+			{
+				workspaceId: WORKSPACE_ID,
+				agent: "claude",
+				prompt: "do the thing",
+				...selection,
+			},
+			validated,
+		);
+		expect(launch.fullCommand).toContain("CLAUDE_CODE_DISABLE_1M_CONTEXT='1'");
+		expect(launch.fullCommand).toContain("'--model' 'claude-opus-5'");
+		expect(launch.fullCommand).not.toContain("claude-opus-5[1m]");
 	});
 
 	it("resumes a previous session with an empty prompt", async () => {
