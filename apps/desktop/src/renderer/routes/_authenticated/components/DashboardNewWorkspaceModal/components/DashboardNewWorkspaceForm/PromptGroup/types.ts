@@ -11,7 +11,7 @@ export const MODEL_STORAGE_KEY = "lastSelectedV2WorkspaceCreateModelByPreset";
 // JSON map of presetId:modelId → effort id (presetId for model-less agents).
 export const EFFORT_STORAGE_KEY = "lastSelectedV2WorkspaceCreateEffortByPreset";
 
-// JSON map of presetId → agent mode id.
+// JSON map of presetId (or presetId:modelId for runtime variants) → mode id.
 export const MODE_TRAIT_STORAGE_KEY =
 	"lastSelectedV2WorkspaceCreateModeByPreset";
 

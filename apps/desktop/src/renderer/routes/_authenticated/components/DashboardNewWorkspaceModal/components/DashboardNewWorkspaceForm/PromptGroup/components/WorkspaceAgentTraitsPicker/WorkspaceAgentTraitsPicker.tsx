@@ -110,11 +110,7 @@ export function WorkspaceAgentTraitsPicker({
 				{effortSupport && (
 					<DropdownMenuRadioGroup
 						value={effectiveEffort}
-						onValueChange={(value) =>
-							onEffortChange(
-								value === effortSupport.defaultEffortId ? null : value,
-							)
-						}
+						onValueChange={onEffortChange}
 					>
 						<DropdownMenuLabel className="px-2 pb-1 pt-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
 							{effortSupport.label ?? "Reasoning"}
@@ -124,7 +120,6 @@ export function WorkspaceAgentTraitsPicker({
 								key={option.id}
 								ref={option.id === effectiveEffort ? activeItemRef : undefined}
 								value={option.id}
-								indicator="check"
 								className="py-1.5 pr-8 pl-2 text-xs [&>span:first-child]:right-2 [&>span:first-child]:left-auto"
 							>
 								{option.label}
@@ -152,7 +147,6 @@ export function WorkspaceAgentTraitsPicker({
 										: undefined
 								}
 								value={option.id}
-								indicator="check"
 								className="py-1.5 pr-8 pl-2 text-xs [&>span:first-child]:right-2 [&>span:first-child]:left-auto"
 							>
 								{option.label}
@@ -178,7 +172,6 @@ export function WorkspaceAgentTraitsPicker({
 										: undefined
 								}
 								value={option.id}
-								indicator="check"
 								className="py-1.5 pr-8 pl-2 text-xs [&>span:first-child]:right-2 [&>span:first-child]:left-auto"
 							>
 								{option.label}
@@ -206,7 +199,6 @@ export function WorkspaceAgentTraitsPicker({
 										: undefined
 								}
 								value={option.id}
-								indicator="check"
 								className="py-1.5 pr-8 pl-2 text-xs [&>span:first-child]:right-2 [&>span:first-child]:left-auto"
 							>
 								{option.label}

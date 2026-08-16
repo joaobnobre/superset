@@ -1,4 +1,7 @@
-import { getAgentContextWindowSupport } from "@superset/shared/agent-models";
+import {
+	type AgentContextWindowSupport,
+	getAgentContextWindowSupport,
+} from "@superset/shared/agent-models";
 import { useCallback, useEffect, useState } from "react";
 
 function readStoredMap(storageKey: string): Record<string, string> {
@@ -28,9 +31,11 @@ function readStoredContextWindow(
 	storageKey: string,
 	presetId: string | null,
 	model: string | null,
+	supportOverride?: AgentContextWindowSupport,
 ): string | null {
 	if (!presetId || !model) return null;
-	const support = getAgentContextWindowSupport(presetId, model);
+	const support =
+		supportOverride ?? getAgentContextWindowSupport(presetId, model);
 	if (!support) return null;
 	const stored =
 		readStoredMap(storageKey)[`${presetId}:${model}`] ??
@@ -44,30 +49,30 @@ export function useAgentContextWindowPreference(
 	storageKey: string,
 	presetId: string | null,
 	model: string | null,
+	supportOverride?: AgentContextWindowSupport,
 ) {
 	const [selectedContextWindow, setSelectedContextWindowState] = useState<
 		string | null
-	>(() => readStoredContextWindow(storageKey, presetId, model));
+	>(() =>
+		readStoredContextWindow(storageKey, presetId, model, supportOverride),
+	);
 
 	useEffect(() => {
 		setSelectedContextWindowState(
-			readStoredContextWindow(storageKey, presetId, model),
+			readStoredContextWindow(storageKey, presetId, model, supportOverride),
 		);
-	}, [storageKey, presetId, model]);
+	}, [storageKey, presetId, model, supportOverride]);
 
 	const setSelectedContextWindow = useCallback(
 		(contextWindow: string | null) => {
 			setSelectedContextWindowState(contextWindow);
-			if (
-				typeof window === "undefined" ||
-				!presetId ||
-				!model ||
-				!contextWindow
-			) {
+			if (typeof window === "undefined" || !presetId || !model) {
 				return;
 			}
 			const map = readStoredMap(storageKey);
-			map[`${presetId}:${model}`] = contextWindow;
+			const preferenceKey = `${presetId}:${model}`;
+			if (contextWindow) map[preferenceKey] = contextWindow;
+			else delete map[preferenceKey];
 			try {
 				window.localStorage.setItem(storageKey, JSON.stringify(map));
 			} catch {

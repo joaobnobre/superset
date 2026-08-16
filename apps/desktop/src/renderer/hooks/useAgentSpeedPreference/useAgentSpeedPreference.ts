@@ -1,4 +1,7 @@
-import { getAgentSpeedSupport } from "@superset/shared/agent-models";
+import {
+	type AgentSpeedSupport,
+	getAgentSpeedSupport,
+} from "@superset/shared/agent-models";
 import { useCallback, useEffect, useState } from "react";
 
 function readStoredMap(storageKey: string): Record<string, string> {
@@ -28,9 +31,10 @@ function readStoredSpeed(
 	storageKey: string,
 	presetId: string | null,
 	model: string | null,
+	supportOverride?: AgentSpeedSupport,
 ): string | null {
 	if (!presetId) return null;
-	const support = getAgentSpeedSupport(presetId, model);
+	const support = supportOverride ?? getAgentSpeedSupport(presetId, model);
 	if (!support) return null;
 	const preferenceKey = model ? `${presetId}:${model}` : presetId;
 	const stored =
@@ -44,22 +48,26 @@ export function useAgentSpeedPreference(
 	storageKey: string,
 	presetId: string | null,
 	model: string | null,
+	supportOverride?: AgentSpeedSupport,
 ) {
 	const [selectedSpeed, setSelectedSpeedState] = useState<string | null>(() =>
-		readStoredSpeed(storageKey, presetId, model),
+		readStoredSpeed(storageKey, presetId, model, supportOverride),
 	);
 
 	useEffect(() => {
-		setSelectedSpeedState(readStoredSpeed(storageKey, presetId, model));
-	}, [storageKey, presetId, model]);
+		setSelectedSpeedState(
+			readStoredSpeed(storageKey, presetId, model, supportOverride),
+		);
+	}, [storageKey, presetId, model, supportOverride]);
 
 	const setSelectedSpeed = useCallback(
 		(speed: string | null) => {
 			setSelectedSpeedState(speed);
-			if (typeof window === "undefined" || !presetId || !speed) return;
+			if (typeof window === "undefined" || !presetId) return;
 			const map = readStoredMap(storageKey);
 			const preferenceKey = model ? `${presetId}:${model}` : presetId;
-			map[preferenceKey] = speed;
+			if (speed) map[preferenceKey] = speed;
+			else delete map[preferenceKey];
 			try {
 				window.localStorage.setItem(storageKey, JSON.stringify(map));
 			} catch {

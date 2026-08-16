@@ -9,6 +9,7 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@superset/ui/select";
+import { sortAgentModelOptions } from "./sortAgentModelOptions";
 
 // Radix Select reserves "" for clearing, so "Default" needs a sentinel.
 const DEFAULT_MODEL_VALUE = "__default_model__";
@@ -54,6 +55,7 @@ export function AgentModelSelect({
 		models,
 		(model) => model.provider ?? "Other",
 	);
+	const sortedModels = sortAgentModelOptions(models);
 
 	const handleValueChange = (nextValue: string) => {
 		onValueChange(nextValue === DEFAULT_MODEL_VALUE ? null : nextValue);
@@ -78,7 +80,7 @@ export function AgentModelSelect({
 								<SelectGroup key={provider}>
 									{index > 0 && <SelectSeparator />}
 									<SelectLabel>{provider}</SelectLabel>
-									{providerModels.map((model) => (
+									{sortAgentModelOptions(providerModels).map((model) => (
 										<SelectItem key={model.id} value={model.id}>
 											{model.label}
 										</SelectItem>
@@ -86,7 +88,7 @@ export function AgentModelSelect({
 								</SelectGroup>
 							),
 						)
-					: models.map((model) => (
+					: sortedModels.map((model) => (
 							<SelectItem key={model.id} value={model.id}>
 								{model.label}
 							</SelectItem>

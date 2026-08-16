@@ -31,9 +31,12 @@ function readStoredModel(
 	const support = supportOverride ?? getAgentModelSupport(presetId);
 	const stored = readStoredMap(storageKey)[presetId] ?? support?.defaultModelId;
 	if (!stored) return null;
+	const resolvedStored = support?.modelAliases?.[stored] ?? stored;
 	// Drop ids that fell out of the curated registry so a stale preference
 	// cannot launch the CLI with an unsupported model.
-	return support?.models.some((model) => model.id === stored) ? stored : null;
+	return support?.models.some((model) => model.id === resolvedStored)
+		? resolvedStored
+		: null;
 }
 
 /**

@@ -1,11 +1,4 @@
 import {
-	getAgentContextWindowSupport,
-	getAgentModelSupport,
-	getAgentModeSupport,
-	getAgentSpeedSupport,
-	resolveAgentEffortSupport,
-} from "@superset/shared/agent-models";
-import {
 	PromptInput,
 	PromptInputButton,
 	PromptInputFooter,
@@ -36,12 +29,7 @@ import { LinkedIssuePill } from "renderer/components/LinkedIssuePill";
 import { MarkdownEditor } from "renderer/components/MarkdownEditor";
 import { useHostProjects } from "renderer/hooks/host-projects/useHostProjects";
 import { resolveHostUrl } from "renderer/hooks/host-service/useHostTargetUrl";
-import { useAgentContextWindowPreference } from "renderer/hooks/useAgentContextWindowPreference";
-import { useAgentEffortPreference } from "renderer/hooks/useAgentEffortPreference";
 import { useAgentLaunchPreferences } from "renderer/hooks/useAgentLaunchPreferences";
-import { useAgentModelPreference } from "renderer/hooks/useAgentModelPreference";
-import { useAgentModePreference } from "renderer/hooks/useAgentModePreference";
-import { useAgentSpeedPreference } from "renderer/hooks/useAgentSpeedPreference";
 import { useRelayUrl } from "renderer/hooks/useRelayUrl";
 import {
 	getCapabilityDisplayInventory,
@@ -58,6 +46,7 @@ import { useNewWorkspacePromptContext } from "renderer/stores/new-workspace-prom
 import { useV2WorkspaceCreateDefaultsStore } from "renderer/stores/v2-workspace-create-defaults";
 import { useDashboardNewWorkspaceDraft } from "../../DashboardNewWorkspaceDraftContext";
 import { useNewWorkspacePromptCardsVariant } from "../../hooks/useNewWorkspacePromptCardsVariant";
+import { useWorkspaceAgentRuntimeSelection } from "../../hooks/useWorkspaceAgentRuntimeSelection";
 import { DevicePicker } from "../DashboardNewWorkspaceForm/components/DevicePicker";
 import { useWorkspaceHostOptions } from "../DashboardNewWorkspaceForm/components/DevicePicker/hooks/useWorkspaceHostOptions";
 import { CompareBaseBranchPicker } from "../DashboardNewWorkspaceForm/PromptGroup/components/CompareBaseBranchPicker";
@@ -374,98 +363,31 @@ export function NewWorkspaceScreen({
 	}, [v2Agents, selectedAgent]);
 	const selectedCapability = capabilitiesByAgentId.get(selectedAgent);
 	const displayInventory = getCapabilityDisplayInventory(selectedCapability);
-	const modelSupport = useMemo(() => {
-		if (!selectedPresetId) return undefined;
-		const support = getAgentModelSupport(selectedPresetId);
-		const models = displayInventory?.models ?? [];
-		if (!support || !models.length) return support;
-		const defaultModelId = models.some(
-			(model) => model.id === support.defaultModelId,
-		)
-			? support.defaultModelId
-			: models[0]?.id;
-		return {
-			...support,
-			defaultModelId,
-			models: models.map(({ id, label, provider }) => ({
-				id,
-				label,
-				provider,
-			})),
-		};
-	}, [displayInventory, selectedPresetId]);
-	const { selectedModel, setSelectedModel } = useAgentModelPreference(
-		MODEL_STORAGE_KEY,
-		modelSupport ? selectedPresetId : null,
+	const {
 		modelSupport,
-	);
-	const resolvedModel =
-		selectedModel ??
-		modelSupport?.defaultModelId ??
-		modelSupport?.models[0]?.id;
-	const effortSupport = useMemo(() => {
-		if (!selectedPresetId) return undefined;
-		const runtimeModel = displayInventory?.models.find(
-			(model) => model.id === resolvedModel,
-		);
-		if (displayInventory?.modelSource !== "runtime") {
-			return resolveAgentEffortSupport(
-				selectedPresetId,
-				resolvedModel,
-				undefined,
-			);
-		}
-		return resolveAgentEffortSupport(
-			selectedPresetId,
-			resolvedModel,
-			runtimeModel?.reasoning,
-		);
-	}, [displayInventory, resolvedModel, selectedPresetId]);
-	const { selectedEffort, setSelectedEffort } = useAgentEffortPreference(
-		EFFORT_STORAGE_KEY,
-		effortSupport ? selectedPresetId : null,
-		resolvedModel ?? null,
+		resolvedModel,
+		launchModel,
+		setSelectedModel,
 		effortSupport,
-	);
-	const resolvedEffort = effortSupport?.efforts.some(
-		(option) => option.id === selectedEffort,
-	)
-		? selectedEffort
-		: null;
-	const modeSupport = selectedPresetId
-		? getAgentModeSupport(selectedPresetId)
-		: undefined;
-	const { selectedMode, setSelectedMode } = useAgentModePreference(
-		MODE_TRAIT_STORAGE_KEY,
-		modeSupport ? selectedPresetId : null,
-	);
-	const speedSupport = selectedPresetId
-		? getAgentSpeedSupport(selectedPresetId, resolvedModel)
-		: undefined;
-	const { selectedSpeed, setSelectedSpeed } = useAgentSpeedPreference(
-		SPEED_STORAGE_KEY,
-		speedSupport ? selectedPresetId : null,
-		resolvedModel ?? null,
-	);
-	const contextWindowSupport = selectedPresetId
-		? getAgentContextWindowSupport(selectedPresetId, resolvedModel)
-		: undefined;
-	const { selectedContextWindow, setSelectedContextWindow } =
-		useAgentContextWindowPreference(
-			CONTEXT_WINDOW_STORAGE_KEY,
-			contextWindowSupport ? selectedPresetId : null,
-			resolvedModel ?? null,
-		);
-	const resolvedSpeed = speedSupport?.speeds.some(
-		(option) => option.id === selectedSpeed,
-	)
-		? selectedSpeed
-		: (speedSupport?.defaultSpeedId ?? null);
-	const resolvedContextWindow = contextWindowSupport?.contextWindows.some(
-		(option) => option.id === selectedContextWindow,
-	)
-		? selectedContextWindow
-		: (contextWindowSupport?.defaultContextWindowId ?? null);
+		modeSupport,
+		speedSupport,
+		contextWindowSupport,
+		resolvedEffort,
+		resolvedMode,
+		resolvedSpeed,
+		resolvedContextWindow,
+		onEffortChange,
+		onModeChange,
+		onSpeedChange,
+		onContextWindowChange,
+		traitsForLaunch,
+	} = useWorkspaceAgentRuntimeSelection(selectedPresetId, displayInventory, {
+		model: MODEL_STORAGE_KEY,
+		effort: EFFORT_STORAGE_KEY,
+		mode: MODE_TRAIT_STORAGE_KEY,
+		speed: SPEED_STORAGE_KEY,
+		contextWindow: CONTEXT_WINDOW_STORAGE_KEY,
+	});
 
 	// ── Base branch ──────────────────────────────────────────────────
 	const { pickerProps } = useBranchPickerController({
@@ -505,11 +427,11 @@ export function NewWorkspaceScreen({
 	const createWorkspace = useSubmitWorkspace(
 		projectId,
 		selectedAgent,
-		modelSupport ? (resolvedModel ?? null) : null,
-		effortSupport ? resolvedEffort : null,
-		modeSupport ? selectedMode : null,
-		speedSupport ? resolvedSpeed : null,
-		contextWindowSupport ? resolvedContextWindow : null,
+		modelSupport ? launchModel : null,
+		traitsForLaunch.effort,
+		traitsForLaunch.mode,
+		traitsForLaunch.speed,
+		traitsForLaunch.contextWindow,
 		uploadAttachments,
 		promptContext,
 	);
@@ -798,14 +720,14 @@ export function NewWorkspaceScreen({
 									speedSupport={speedSupport}
 									contextWindowSupport={contextWindowSupport}
 									effort={resolvedEffort}
-									mode={selectedMode}
+									mode={resolvedMode}
 									speed={resolvedSpeed}
 									contextWindow={resolvedContextWindow}
-									onEffortChange={setSelectedEffort}
-									onModeChange={setSelectedMode}
-									onSpeedChange={setSelectedSpeed}
-									onContextWindowChange={setSelectedContextWindow}
-									triggerClassName={`${PILL_BUTTON_CLASS} px-1.5 gap-1 text-foreground w-auto max-w-[180px]`}
+									onEffortChange={onEffortChange}
+									onModeChange={onModeChange}
+									onSpeedChange={onSpeedChange}
+									onContextWindowChange={onContextWindowChange}
+									triggerClassName={`${PILL_BUTTON_CLASS} px-1.5 gap-1 text-foreground w-auto max-w-[220px]`}
 								/>
 							)}
 						</PromptInputTools>
