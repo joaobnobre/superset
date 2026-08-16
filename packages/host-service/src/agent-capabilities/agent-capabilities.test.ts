@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import {
+	type AgentCapabilityModel,
 	AgentCapabilityProbeAbortedError,
 	buildWindowsTreeKillArgs,
 	discoverCopilotModels,
@@ -24,6 +25,33 @@ import {
 } from "./agent-capabilities";
 
 const nodeErrorSchema = z.object({ code: z.string() });
+
+function expectedCursorModel(input: {
+	id: string;
+	label: string;
+	provider: string;
+	familyId: string;
+	familyLabel: string;
+	effort?: string;
+	speed?: "standard" | "fast";
+	mode?: "standard" | "thinking";
+	contextWindow?: "default" | "1m";
+}): AgentCapabilityModel {
+	return {
+		id: input.id,
+		label: input.label,
+		provider: input.provider,
+		reasoning: { state: "unknown" as const },
+		variant: {
+			familyId: input.familyId,
+			familyLabel: input.familyLabel,
+			effort: input.effort ?? "default",
+			speed: input.speed ?? "standard",
+			mode: input.mode ?? "standard",
+			contextWindow: input.contextWindow ?? "default",
+		},
+	};
+}
 
 describe("agent capabilities", () => {
 	test("builds a recursive forced Windows process-tree kill", () => {
@@ -244,118 +272,71 @@ describe("agent capabilities", () => {
 				].join("\n"),
 			),
 		).toEqual([
-			{
+			expectedCursorModel({
 				id: "auto",
 				label: "Auto (default)",
 				provider: "Recommended",
-				reasoning: { state: "unknown" },
-				variant: {
-					familyId: "auto",
-					familyLabel: "Auto",
-					effort: "default",
-					speed: "standard",
-					mode: "standard",
-					contextWindow: "default",
-				},
-			},
-			{
+				familyId: "auto",
+				familyLabel: "Auto",
+			}),
+			expectedCursorModel({
 				id: "claude-opus-5-thinking-high",
 				label: "Opus 5 1M Thinking",
 				provider: "Anthropic",
-				reasoning: { state: "unknown" },
-				variant: {
-					familyId: "claude-opus-5",
-					familyLabel: "Opus 5",
-					effort: "high",
-					speed: "standard",
-					mode: "thinking",
-					contextWindow: "1m",
-				},
-			},
-			{
+				familyId: "claude-opus-5",
+				familyLabel: "Opus 5",
+				effort: "high",
+				mode: "thinking",
+				contextWindow: "1m",
+			}),
+			expectedCursorModel({
 				id: "gpt-5.6-sol-high",
 				label: "GPT-5.6 Sol 1M High",
 				provider: "OpenAI",
-				reasoning: { state: "unknown" },
-				variant: {
-					familyId: "gpt-5.6-sol",
-					familyLabel: "GPT-5.6 Sol",
-					effort: "high",
-					speed: "standard",
-					mode: "standard",
-					contextWindow: "1m",
-				},
-			},
-			{
+				familyId: "gpt-5.6-sol",
+				familyLabel: "GPT-5.6 Sol",
+				effort: "high",
+				contextWindow: "1m",
+			}),
+			expectedCursorModel({
 				id: "gemini-3.7-flash-high",
 				label: "Gemini 3.7 Flash",
 				provider: "Google",
-				reasoning: { state: "unknown" },
-				variant: {
-					familyId: "gemini-3.7-flash",
-					familyLabel: "Gemini 3.7 Flash",
-					effort: "high",
-					speed: "standard",
-					mode: "standard",
-					contextWindow: "default",
-				},
-			},
-			{
+				familyId: "gemini-3.7-flash",
+				familyLabel: "Gemini 3.7 Flash",
+				effort: "high",
+			}),
+			expectedCursorModel({
 				id: "cursor-grok-4.6-high",
 				label: "Cursor Grok 4.6",
 				provider: "xAI",
-				reasoning: { state: "unknown" },
-				variant: {
-					familyId: "cursor-grok-4.6",
-					familyLabel: "Cursor Grok 4.6",
-					effort: "high",
-					speed: "standard",
-					mode: "standard",
-					contextWindow: "default",
-				},
-			},
-			{
+				familyId: "cursor-grok-4.6",
+				familyLabel: "Cursor Grok 4.6",
+				effort: "high",
+			}),
+			expectedCursorModel({
 				id: "composer-2.5",
 				label: "Composer 2.5",
 				provider: "Cursor",
-				reasoning: { state: "unknown" },
-				variant: {
-					familyId: "composer-2.5",
-					familyLabel: "Composer 2.5",
-					effort: "default",
-					speed: "standard",
-					mode: "standard",
-					contextWindow: "default",
-				},
-			},
-			{
+				familyId: "composer-2.5",
+				familyLabel: "Composer 2.5",
+			}),
+			expectedCursorModel({
 				id: "kimi-k3-max",
 				label: "Kimi K3",
 				provider: "Moonshot AI",
-				reasoning: { state: "unknown" },
-				variant: {
-					familyId: "kimi-k3",
-					familyLabel: "Kimi K3",
-					effort: "max",
-					speed: "standard",
-					mode: "standard",
-					contextWindow: "default",
-				},
-			},
-			{
+				familyId: "kimi-k3",
+				familyLabel: "Kimi K3",
+				effort: "max",
+			}),
+			expectedCursorModel({
 				id: "glm-5.2-max",
 				label: "GLM 5.2 Max",
 				provider: "Zhipu AI",
-				reasoning: { state: "unknown" },
-				variant: {
-					familyId: "glm-5.2",
-					familyLabel: "GLM 5.2",
-					effort: "max",
-					speed: "standard",
-					mode: "standard",
-					contextWindow: "default",
-				},
-			},
+				familyId: "glm-5.2",
+				familyLabel: "GLM 5.2",
+				effort: "max",
+			}),
 		]);
 	});
 
@@ -365,20 +346,13 @@ describe("agent capabilities", () => {
 				"Available models\nnot a model\nauto - Auto (default)\nTip: use --model <id>\nfooter-model - Must not appear",
 			),
 		).toEqual([
-			{
+			expectedCursorModel({
 				id: "auto",
 				label: "Auto (default)",
 				provider: "Recommended",
-				reasoning: { state: "unknown" },
-				variant: {
-					familyId: "auto",
-					familyLabel: "Auto",
-					effort: "default",
-					speed: "standard",
-					mode: "standard",
-					contextWindow: "default",
-				},
-			},
+				familyId: "auto",
+				familyLabel: "Auto",
+			}),
 		]);
 	});
 

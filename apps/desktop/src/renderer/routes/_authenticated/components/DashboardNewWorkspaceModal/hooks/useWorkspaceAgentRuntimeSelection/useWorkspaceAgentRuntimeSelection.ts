@@ -13,6 +13,7 @@ import { useAgentModePreference } from "renderer/hooks/useAgentModePreference";
 import { useAgentSpeedPreference } from "renderer/hooks/useAgentSpeedPreference";
 import type { AgentChoiceCapability } from "renderer/hooks/useV2AgentChoices";
 import {
+	buildCursorLaunchSelection,
 	buildCursorModelSupport,
 	buildCursorVariantSupports,
 	type CursorVariantDimension,
@@ -175,8 +176,8 @@ export function useWorkspaceAgentRuntimeSelection(
 		contextWindowSupport?.contextWindows,
 		contextWindowSupport?.defaultContextWindowId,
 	);
-	const resolvedCursorVariant = hasCursorVariants
-		? resolveCursorVariant(cursorVariants, {
+	const cursorLaunchSelection = hasCursorVariants
+		? buildCursorLaunchSelection(cursorVariants, {
 				effort: resolvedEffort,
 				mode: resolvedMode,
 				speed: resolvedSpeed,
@@ -219,17 +220,19 @@ export function useWorkspaceAgentRuntimeSelection(
 	return {
 		modelSupport,
 		resolvedModel,
-		launchModel: resolvedCursorVariant?.id ?? resolvedModel ?? null,
+		launchModel: cursorLaunchSelection?.launchModel ?? resolvedModel ?? null,
 		setSelectedModel,
 		effortSupport,
 		modeSupport,
 		speedSupport,
 		contextWindowSupport,
-		resolvedEffort: resolvedCursorVariant?.variant?.effort ?? resolvedEffort,
-		resolvedMode: resolvedCursorVariant?.variant?.mode ?? resolvedMode,
-		resolvedSpeed: resolvedCursorVariant?.variant?.speed ?? resolvedSpeed,
+		resolvedEffort:
+			cursorLaunchSelection?.resolvedTraits.effort ?? resolvedEffort,
+		resolvedMode: cursorLaunchSelection?.resolvedTraits.mode ?? resolvedMode,
+		resolvedSpeed: cursorLaunchSelection?.resolvedTraits.speed ?? resolvedSpeed,
 		resolvedContextWindow:
-			resolvedCursorVariant?.variant?.contextWindow ?? resolvedContextWindow,
+			cursorLaunchSelection?.resolvedTraits.contextWindow ??
+			resolvedContextWindow,
 		onEffortChange: hasCursorVariants
 			? (value: string | null) => applyCursorDimension("effort", value)
 			: (value: string | null) =>
@@ -245,8 +248,8 @@ export function useWorkspaceAgentRuntimeSelection(
 		onContextWindowChange: hasCursorVariants
 			? (value: string | null) => applyCursorDimension("contextWindow", value)
 			: setSelectedContextWindow,
-		traitsForLaunch: hasCursorVariants
-			? { effort: null, mode: null, speed: null, contextWindow: null }
+		traitsForLaunch: cursorLaunchSelection
+			? cursorLaunchSelection.traitsForLaunch
 			: {
 					effort: effortSupport ? resolvedEffort : null,
 					mode: modeSupport ? resolvedMode : null,

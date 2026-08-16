@@ -89,6 +89,14 @@ function inventory(
 						{ id: "high", label: "High" },
 					],
 				},
+				variant: {
+					familyId: "model",
+					familyLabel: "Model",
+					effort: "high",
+					speed: "fast",
+					mode: "thinking",
+					contextWindow: "1m",
+				},
 			},
 		],
 		inventoryCheckedAt: "2026-08-14T12:00:00.000Z",
@@ -137,6 +145,14 @@ describe("capability snapshot repository", () => {
 		expect(snapshots[0]?.inventory?.models[0]).toMatchObject({
 			id: "model-1",
 			reasoning: { state: "supported", defaultId: "high" },
+			variant: {
+				familyId: "model",
+				familyLabel: "Model",
+				effort: "high",
+				speed: "fast",
+				mode: "thinking",
+				contextWindow: "1m",
+			},
 		});
 		reopened.sqlite.close();
 	});

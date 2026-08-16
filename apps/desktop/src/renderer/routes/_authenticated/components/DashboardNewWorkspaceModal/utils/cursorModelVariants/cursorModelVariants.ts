@@ -21,6 +21,12 @@ export interface CursorVariantSelection {
 
 export type CursorVariantDimension = keyof CursorVariantSelection;
 
+export interface CursorLaunchSelection {
+	launchModel: string | null;
+	resolvedTraits: Required<CursorVariantSelection>;
+	traitsForLaunch: Required<CursorVariantSelection>;
+}
+
 const CURSOR_VARIANT_DIMENSIONS: readonly CursorVariantDimension[] = [
 	"effort",
 	"speed",
@@ -193,6 +199,29 @@ export function resolveCursorVariant(
 		const bestScore = scoreCursorVariant(best, selection, preferredDimension);
 		return score > bestScore ? candidate : best;
 	}, candidates[0]);
+}
+
+export function buildCursorLaunchSelection(
+	models: readonly CursorRuntimeModel[],
+	selection: CursorVariantSelection,
+): CursorLaunchSelection {
+	const resolved = resolveCursorVariant(models, selection);
+	return {
+		launchModel: resolved?.id ?? null,
+		resolvedTraits: {
+			effort: resolved?.variant?.effort ?? selection.effort ?? null,
+			speed: resolved?.variant?.speed ?? selection.speed ?? null,
+			mode: resolved?.variant?.mode ?? selection.mode ?? null,
+			contextWindow:
+				resolved?.variant?.contextWindow ?? selection.contextWindow ?? null,
+		},
+		traitsForLaunch: {
+			effort: null,
+			speed: null,
+			mode: null,
+			contextWindow: null,
+		},
+	};
 }
 
 function scoreCursorVariant(

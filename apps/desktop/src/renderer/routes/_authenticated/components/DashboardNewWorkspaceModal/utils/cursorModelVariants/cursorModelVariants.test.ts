@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import type { AgentModelSupport } from "@superset/shared/agent-models";
+import type {
+	AgentModelSupport,
+	AgentRuntimeModelVariant,
+} from "@superset/shared/agent-models";
 import {
+	buildCursorLaunchSelection,
 	buildCursorModelSupport,
 	buildCursorVariantSupports,
 	type CursorRuntimeModel,
@@ -13,59 +17,52 @@ const transport: AgentModelSupport = {
 	models: [],
 };
 
-const models: CursorRuntimeModel[] = [
-	{
-		id: "gpt-5.6-sol-medium",
-		label: "GPT-5.6 Sol 1M",
-		provider: "OpenAI",
+function runtimeModel(
+	id: string,
+	variant: Partial<AgentRuntimeModelVariant> = {},
+	metadata: Partial<Pick<CursorRuntimeModel, "label" | "provider">> = {},
+): CursorRuntimeModel {
+	return {
+		id,
+		label: metadata.label ?? id,
+		provider: metadata.provider ?? "OpenAI",
 		variant: {
 			familyId: "gpt-5.6-sol",
 			familyLabel: "GPT-5.6 Sol",
 			effort: "medium",
 			speed: "standard",
-			mode: "standard",
-			contextWindow: "1m",
-		},
-	},
-	{
-		id: "gpt-5.6-sol-medium-fast",
-		label: "GPT-5.6 Sol Fast",
-		provider: "OpenAI",
-		variant: {
-			familyId: "gpt-5.6-sol",
-			familyLabel: "GPT-5.6 Sol",
-			effort: "medium",
-			speed: "fast",
 			mode: "standard",
 			contextWindow: "default",
+			...variant,
 		},
-	},
-	{
-		id: "gpt-5.6-sol-high",
-		label: "GPT-5.6 Sol 1M High",
-		provider: "OpenAI",
-		variant: {
-			familyId: "gpt-5.6-sol",
-			familyLabel: "GPT-5.6 Sol",
-			effort: "high",
-			speed: "standard",
-			mode: "standard",
-			contextWindow: "1m",
-		},
-	},
-	{
-		id: "composer-2.5",
-		label: "Composer 2.5",
-		provider: "Cursor",
-		variant: {
+	};
+}
+
+const models: CursorRuntimeModel[] = [
+	runtimeModel(
+		"gpt-5.6-sol-medium",
+		{ contextWindow: "1m" },
+		{ label: "GPT-5.6 Sol 1M" },
+	),
+	runtimeModel(
+		"gpt-5.6-sol-medium-fast",
+		{ speed: "fast" },
+		{ label: "GPT-5.6 Sol Fast" },
+	),
+	runtimeModel(
+		"gpt-5.6-sol-high",
+		{ effort: "high", contextWindow: "1m" },
+		{ label: "GPT-5.6 Sol 1M High" },
+	),
+	runtimeModel(
+		"composer-2.5",
+		{
 			familyId: "composer-2.5",
 			familyLabel: "Composer 2.5",
 			effort: "default",
-			speed: "standard",
-			mode: "standard",
-			contextWindow: "default",
 		},
-	},
+		{ label: "Composer 2.5", provider: "Cursor" },
+	),
 ];
 
 describe("Cursor model variants", () => {
@@ -114,44 +111,60 @@ describe("Cursor model variants", () => {
 		).toBe("gpt-5.6-sol-medium-fast");
 	});
 
+	test("returns the exact runtime id and clears separately launched traits", () => {
+		expect(
+			buildCursorLaunchSelection(models.slice(0, 3), {
+				effort: "medium",
+				speed: "fast",
+				mode: "standard",
+				contextWindow: "default",
+			}),
+		).toEqual({
+			launchModel: "gpt-5.6-sol-medium-fast",
+			resolvedTraits: {
+				effort: "medium",
+				speed: "fast",
+				mode: "standard",
+				contextWindow: "default",
+			},
+			traitsForLaunch: {
+				effort: null,
+				speed: null,
+				mode: null,
+				contextWindow: null,
+			},
+		});
+	});
+
 	test("keeps an unsuffixed runtime id as an explicit default effort", () => {
 		const defaultModels: CursorRuntimeModel[] = [
-			{
-				id: "gpt-5.2-low",
-				label: "GPT-5.2 Low",
-				variant: {
+			runtimeModel(
+				"gpt-5.2-low",
+				{
 					familyId: "gpt-5.2",
 					familyLabel: "GPT-5.2",
 					effort: "low",
-					speed: "standard",
-					mode: "standard",
-					contextWindow: "default",
 				},
-			},
-			{
-				id: "gpt-5.2",
-				label: "GPT-5.2",
-				variant: {
+				{ label: "GPT-5.2 Low" },
+			),
+			runtimeModel(
+				"gpt-5.2",
+				{
 					familyId: "gpt-5.2",
 					familyLabel: "GPT-5.2",
 					effort: "default",
-					speed: "standard",
-					mode: "standard",
-					contextWindow: "default",
 				},
-			},
-			{
-				id: "gpt-5.2-high",
-				label: "GPT-5.2 High",
-				variant: {
+				{ label: "GPT-5.2" },
+			),
+			runtimeModel(
+				"gpt-5.2-high",
+				{
 					familyId: "gpt-5.2",
 					familyLabel: "GPT-5.2",
 					effort: "high",
-					speed: "standard",
-					mode: "standard",
-					contextWindow: "default",
 				},
-			},
+				{ label: "GPT-5.2 High" },
+			),
 		];
 
 		expect(buildCursorVariantSupports(defaultModels).effort).toMatchObject({
@@ -178,42 +191,34 @@ describe("Cursor model variants", () => {
 
 	test("selects a runtime default effort without treating it as absent", () => {
 		const grokModels: CursorRuntimeModel[] = [
-			{
-				id: "cursor-grok-4.6-high-fast",
-				label: "Cursor Grok 4.6 Fast",
-				variant: {
+			runtimeModel(
+				"cursor-grok-4.6-high-fast",
+				{
 					familyId: "cursor-grok-4.6",
 					familyLabel: "Cursor Grok 4.6",
 					effort: "high",
 					speed: "fast",
-					mode: "standard",
-					contextWindow: "default",
 				},
-			},
-			{
-				id: "cursor-grok-4.6-low",
-				label: "Cursor Grok 4.6 Low",
-				variant: {
+				{ label: "Cursor Grok 4.6 Fast" },
+			),
+			runtimeModel(
+				"cursor-grok-4.6-low",
+				{
 					familyId: "cursor-grok-4.6",
 					familyLabel: "Cursor Grok 4.6",
 					effort: "low",
-					speed: "standard",
-					mode: "standard",
-					contextWindow: "default",
 				},
-			},
-			{
-				id: "cursor-grok-4.6-high",
-				label: "Cursor Grok 4.6",
-				variant: {
+				{ label: "Cursor Grok 4.6 Low" },
+			),
+			runtimeModel(
+				"cursor-grok-4.6-high",
+				{
 					familyId: "cursor-grok-4.6",
 					familyLabel: "Cursor Grok 4.6",
 					effort: "high",
-					speed: "standard",
-					mode: "standard",
-					contextWindow: "default",
 				},
-			},
+				{ label: "Cursor Grok 4.6" },
+			),
 		];
 
 		expect(buildCursorVariantSupports(grokModels).speed).toMatchObject({
