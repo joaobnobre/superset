@@ -510,11 +510,7 @@ export const workspacesRouter = router({
 		.input(createInputSchema)
 		.mutation(async ({ ctx, input }) => {
 			for (const launch of input.agents ?? []) {
-				await validateAgentLaunchSelection(
-					ctx.db,
-					launch,
-					ctx.capabilityRefresh,
-				);
+				await validateAgentLaunchSelection(ctx.db, launch);
 			}
 
 			const localProject = requireLocalProject(ctx, input.projectId);
@@ -1111,21 +1107,17 @@ export const workspacesRouter = router({
 			const soleLaunch = sugarLaunches.length === 1 ? sugarLaunches[0] : null;
 			if (!alreadyExists && input.waitForSetupBeforeAgents && soleLaunch) {
 				try {
-					chainAgent = await buildValidatedTerminalAgentLaunch(
-						ctx.db,
-						{
-							workspaceId: workspaceRow.id,
-							agent: soleLaunch.agent,
-							prompt: soleLaunch.prompt,
-							attachmentIds: soleLaunch.attachmentIds,
-							model: soleLaunch.model,
-							effort: soleLaunch.effort,
-							mode: soleLaunch.mode,
-							speed: soleLaunch.speed,
-							contextWindow: soleLaunch.contextWindow,
-						},
-						ctx.capabilityRefresh,
-					);
+					chainAgent = await buildValidatedTerminalAgentLaunch(ctx.db, {
+						workspaceId: workspaceRow.id,
+						agent: soleLaunch.agent,
+						prompt: soleLaunch.prompt,
+						attachmentIds: soleLaunch.attachmentIds,
+						model: soleLaunch.model,
+						effort: soleLaunch.effort,
+						mode: soleLaunch.mode,
+						speed: soleLaunch.speed,
+						contextWindow: soleLaunch.contextWindow,
+					});
 				} catch (err) {
 					console.warn(
 						"[workspaces.create] wait-for-setup chain unavailable, dispatching agent in parallel:",
@@ -1237,11 +1229,7 @@ export const workspacesRouter = router({
 				});
 			}
 			for (const launch of input.agents ?? []) {
-				await validateAgentLaunchSelection(
-					ctx.db,
-					launch,
-					ctx.capabilityRefresh,
-				);
+				await validateAgentLaunchSelection(ctx.db, launch);
 			}
 			requireLocalProject(ctx, input.projectId);
 

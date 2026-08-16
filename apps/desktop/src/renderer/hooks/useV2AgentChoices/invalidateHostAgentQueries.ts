@@ -1,10 +1,7 @@
 import type { HostAgentConfig } from "@superset/host-service/settings";
 import type { QueryClient } from "@tanstack/react-query";
 import { V2_AGENT_CONFIGS_QUERY_KEY } from "renderer/hooks/useV2AgentConfigs";
-import {
-	hostAgentCapabilityRefreshQueryKey,
-	hostAgentCapabilitySnapshotQueryKey,
-} from "./capabilityQueryKeys";
+import { hostAgentCapabilitySnapshotQueryKey } from "./capabilityQueryKeys";
 
 export type HostAgentQueryInvalidation = "config" | "config-and-capabilities";
 
@@ -48,8 +45,5 @@ export function invalidateHostAgentQueries(
 	if (scope !== "config-and-capabilities") return;
 	void queryClient.invalidateQueries({
 		queryKey: hostAgentCapabilitySnapshotQueryKey(hostUrl),
-	});
-	void queryClient.invalidateQueries({
-		queryKey: hostAgentCapabilityRefreshQueryKey(hostUrl),
 	});
 }

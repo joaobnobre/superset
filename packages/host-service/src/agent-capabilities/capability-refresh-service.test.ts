@@ -17,12 +17,8 @@ import {
 	runCommand,
 } from "./agent-capabilities";
 import {
-	CAPABILITY_LAUNCH_FRESHNESS_MS,
-	CAPABILITY_PICKER_FRESHNESS_MS,
-	CAPABILITY_RETRY_BASE_DELAY_MS,
 	CapabilityRefreshService,
 	clearCapabilityRefreshState,
-	ensureFreshAgentCapability,
 	ObsoleteCapabilityRefreshError,
 	type RevisionedAgentCapabilityConfig,
 	readPersistedCapabilitySnapshots,
@@ -207,7 +203,6 @@ describe("capability refresh service", () => {
 						message: null,
 					},
 					healthOrigin: "persisted",
-					refreshStatus: "idle",
 				},
 			],
 		);
@@ -243,11 +238,10 @@ describe("capability refresh service", () => {
 				message: null,
 			},
 			healthOrigin: "persisted",
-			refreshStatus: "idle",
 		});
 	});
 
-	it("backs off transient failures without scheduling retry timers", async () => {
+	it("honors every explicit refresh after a transient failure", async () => {
 		const db = createTestDb();
 		const config = seedConfig(db);
 		const service = new CapabilityRefreshService(db);
@@ -269,59 +263,37 @@ describe("capability refresh service", () => {
 			});
 		};
 
-		await service.refreshCapability(config, {
-			force: true,
-			now: CHECKED_AT_MS,
-			probe,
-		});
-		const firstBackoff = await service.refreshCapability(config, {
-			now: CHECKED_AT_MS + CAPABILITY_RETRY_BASE_DELAY_MS - 1,
-			probe,
-		});
-		expect(firstBackoff.refreshStatus).toBe("backoff");
-		expect(probes).toBe(1);
+		await service.refreshCapability(config, { now: CHECKED_AT_MS, probe });
 		expect(listCapabilitySnapshots(db)[0]).toMatchObject({
 			errorKind: "timeout",
 			message: SANITIZED_CAPABILITY_MESSAGES.timeout,
 			resolverSource: "wrapper",
 		});
-
-		await service.refreshCapability(config, {
-			now: CHECKED_AT_MS + CAPABILITY_RETRY_BASE_DELAY_MS,
-			probe,
-		});
-		const secondBackoff = await service.refreshCapability(config, {
-			now: CHECKED_AT_MS + CAPABILITY_RETRY_BASE_DELAY_MS * 3 - 1,
-			probe,
-		});
-		expect(secondBackoff.refreshStatus).toBe("backoff");
-		expect(probes).toBe(2);
-
+		await service.refreshCapability(config, { now: CHECKED_AT_MS + 1, probe });
 		const recovered = await service.refreshCapability(config, {
-			now: CHECKED_AT_MS + CAPABILITY_RETRY_BASE_DELAY_MS * 3,
+			now: CHECKED_AT_MS + 2,
 			probe,
 		});
 		expect(recovered).toMatchObject({
 			health: { status: "ready", errorKind: null },
-			refreshStatus: "idle",
 		});
 		expect(probes).toBe(3);
 		await service.dispose();
 	});
 
-	it("reuses picker-fresh health without probing", async () => {
+	it("refreshes a persisted observation without a picker TTL", async () => {
 		const db = createTestDb();
 		const config = seedConfig(db);
 		persistSnapshot(db, config);
 		let probeCalls = 0;
 		const result = await refreshAgentCapability(db, config, {
-			now: CHECKED_AT_MS + CAPABILITY_PICKER_FRESHNESS_MS - 1,
+			now: CHECKED_AT_MS + 5 * 60 * 1_000 - 1,
 			probe: async () => {
 				probeCalls += 1;
 				return liveSnapshot(config);
 			},
 		});
-		expect(probeCalls).toBe(0);
+		expect(probeCalls).toBe(1);
 		expect(result.inventory?.models).toHaveLength(1);
 	});
 
@@ -335,14 +307,14 @@ describe("capability refresh service", () => {
 			return liveSnapshot(config);
 		};
 		const [first, second] = await Promise.all([
-			refreshAgentCapability(db, config, { force: true, probe }),
-			refreshAgentCapability(db, config, { force: true, probe }),
+			refreshAgentCapability(db, config, { probe }),
+			refreshAgentCapability(db, config, { probe }),
 		]);
 		expect(probeCalls).toBe(1);
 		expect(second).toEqual(first);
 	});
 
-	it("reuses a live launch lease for 30 seconds", async () => {
+	it("probes every sequential explicit refresh", async () => {
 		const db = createTestDb();
 		const config = seedConfig(db);
 		let probes = 0;
@@ -351,16 +323,16 @@ describe("capability refresh service", () => {
 			return liveSnapshot(config);
 		};
 
-		await ensureFreshAgentCapability(db, config, {
+		await refreshAgentCapability(db, config, {
 			now: CHECKED_AT_MS,
 			probe,
 		});
-		await ensureFreshAgentCapability(db, config, {
+		await refreshAgentCapability(db, config, {
 			now: CHECKED_AT_MS + 29_999,
 			probe,
 		});
 
-		expect(probes).toBe(1);
+		expect(probes).toBe(2);
 	});
 
 	it("cancels in-flight work and rejects new refreshes after disposal", async () => {
@@ -369,7 +341,6 @@ describe("capability refresh service", () => {
 		const service = new CapabilityRefreshService(db);
 		const refresh = service
 			.refreshCapability(config, {
-				force: true,
 				probe: (_config, options) =>
 					new Promise((_resolve, reject) => {
 						options.signal?.addEventListener(
@@ -389,7 +360,7 @@ describe("capability refresh service", () => {
 		);
 	});
 
-	it("isolates live leases and process caches between app instances", async () => {
+	it("isolates refresh state between app instances", async () => {
 		const firstDb = createTestDb();
 		const secondDb = createTestDb();
 		const firstConfig = seedConfig(firstDb);
@@ -398,13 +369,13 @@ describe("capability refresh service", () => {
 		const secondService = new CapabilityRefreshService(secondDb);
 		let probes = 0;
 
-		const first = await firstService.ensureFreshCapability(firstConfig, {
+		const first = await firstService.refreshCapability(firstConfig, {
 			probe: async () => {
 				probes += 1;
 				return liveSnapshot(firstConfig, { version: "first" });
 			},
 		});
-		const second = await secondService.ensureFreshCapability(secondConfig, {
+		const second = await secondService.refreshCapability(secondConfig, {
 			probe: async () => {
 				probes += 1;
 				return liveSnapshot(secondConfig, { version: "second" });
@@ -412,8 +383,8 @@ describe("capability refresh service", () => {
 		});
 
 		expect(probes).toBe(2);
-		expect(first.version).toBe("first");
-		expect(second.version).toBe("second");
+		expect(first.inventory?.detectedVersion).toBe("first");
+		expect(second.inventory?.detectedVersion).toBe("second");
 		await Promise.all([firstService.dispose(), secondService.dispose()]);
 	});
 
@@ -422,7 +393,6 @@ describe("capability refresh service", () => {
 		const config = seedConfig(db);
 		persistSnapshot(db, config);
 		const result = await refreshAgentCapability(db, config, {
-			force: true,
 			now: CHECKED_AT_MS + 10_000,
 			probe: async () =>
 				liveSnapshot(config, {
@@ -451,7 +421,6 @@ describe("capability refresh service", () => {
 		const config = seedConfig(db);
 		persistSnapshot(db, config);
 		const view = await refreshAgentCapability(db, config, {
-			force: true,
 			probe: async () =>
 				liveSnapshot(config, {
 					status: "unavailable",
@@ -489,7 +458,6 @@ describe("capability refresh service", () => {
 		const config = seedConfig(db);
 		await expect(
 			refreshAgentCapability(db, config, {
-				force: true,
 				probe: async () => {
 					db.update(schema.hostAgentConfigs)
 						.set({ capabilityRevision: 2 })
@@ -509,7 +477,6 @@ describe("capability refresh service", () => {
 		let active = 0;
 		let maxActive = 0;
 		const results = await refreshAgentCapabilities(db, configs, {
-			force: true,
 			concurrency: 2,
 			probe: async (config) => {
 				active += 1;
@@ -525,14 +492,13 @@ describe("capability refresh service", () => {
 		);
 	});
 
-	it("converts oversized live inventory into parse_failure health while preserving last-good inventory and entering backoff", async () => {
+	it("converts oversized live inventory into parse_failure health while preserving last-good inventory", async () => {
 		const db = createTestDb();
 		const config = seedConfig(db);
 		persistSnapshot(db, config);
 
 		const service = new CapabilityRefreshService(db);
 		const result = await service.refreshCapability(config, {
-			force: true,
 			now: CHECKED_AT_MS + 10_000,
 			probe: async () =>
 				liveSnapshot(config, {
@@ -563,12 +529,6 @@ describe("capability refresh service", () => {
 		});
 		expect(persisted?.inventory?.models).toHaveLength(1);
 
-		const backoff = await service.refreshCapability(config, {
-			now: CHECKED_AT_MS + 10_000 + CAPABILITY_RETRY_BASE_DELAY_MS - 1,
-			probe: async () => liveSnapshot(config),
-		});
-		expect(backoff.refreshStatus).toBe("backoff");
-
 		await service.dispose();
 	});
 
@@ -578,7 +538,6 @@ describe("capability refresh service", () => {
 		persistSnapshot(db, config);
 		const service = new CapabilityRefreshService(db);
 		const result = await service.refreshCapability(config, {
-			force: true,
 			now: CHECKED_AT_MS + 10_000,
 			probe: async () =>
 				liveSnapshot(config, {
@@ -605,11 +564,6 @@ describe("capability refresh service", () => {
 			healthOrigin: "live",
 		});
 		expect(listCapabilitySnapshots(db)[0]?.inventory?.models).toHaveLength(1);
-		const backoff = await service.refreshCapability(config, {
-			now: CHECKED_AT_MS + 10_000 + CAPABILITY_RETRY_BASE_DELAY_MS - 1,
-			probe: async () => liveSnapshot(config),
-		});
-		expect(backoff.refreshStatus).toBe("backoff");
 		await service.dispose();
 	});
 
@@ -624,7 +578,6 @@ describe("capability refresh service", () => {
 		const results = await service.refreshCapabilities(
 			[agent1, agent2, agent3],
 			{
-				force: true,
 				now: CHECKED_AT_MS + 5_000,
 				probe: async (config) => {
 					if (config.id === "agent-2") {
@@ -676,7 +629,6 @@ describe("capability refresh service", () => {
 
 		const refreshPromise = service
 			.refreshCapabilities([agent1, agent2], {
-				force: true,
 				probe: (_config, options) =>
 					new Promise((_resolve, reject) => {
 						options.signal?.addEventListener(
@@ -694,68 +646,6 @@ describe("capability refresh service", () => {
 		);
 	});
 
-	it("doubles exponential backoff delay on consecutive transient failures and clears upon recovery", async () => {
-		const db = createTestDb();
-		const config = seedConfig(db);
-		const service = new CapabilityRefreshService(db);
-		let probes = 0;
-
-		const probe = async (
-			_config: AgentCapabilityConfig,
-			options: { now?: number },
-		) => {
-			probes += 1;
-			return liveSnapshot(config, {
-				status: probes < 4 ? "unavailable" : "ready",
-				modelSource: probes < 4 ? "none" : "runtime",
-				models: probes < 4 ? [] : liveSnapshot(config).models,
-				errorKind: probes < 4 ? "timeout" : null,
-				checkedAt: new Date(options.now ?? CHECKED_AT_MS).toISOString(),
-			});
-		};
-
-		// 1st failure: next retry at base delay (30s)
-		await service.refreshCapability(config, {
-			force: true,
-			now: CHECKED_AT_MS,
-			probe,
-		});
-		expect(probes).toBe(1);
-
-		// 2nd failure attempt at 30s: next retry at 30 + 60 = 90s
-		await service.refreshCapability(config, {
-			now: CHECKED_AT_MS + CAPABILITY_RETRY_BASE_DELAY_MS,
-			probe,
-		});
-		expect(probes).toBe(2);
-
-		// At 60s (before 90s), should be in backoff
-		const skipped = await service.refreshCapability(config, {
-			now: CHECKED_AT_MS + 60_000,
-			probe,
-		});
-		expect(skipped.refreshStatus).toBe("backoff");
-		expect(probes).toBe(2);
-
-		// 3rd failure attempt at 90s: next retry at 90 + 120 = 210s
-		await service.refreshCapability(config, {
-			now: CHECKED_AT_MS + 90_000,
-			probe,
-		});
-		expect(probes).toBe(3);
-
-		// 4th attempt at 210s: recovers
-		const recovered = await service.refreshCapability(config, {
-			now: CHECKED_AT_MS + 210_000,
-			probe,
-		});
-		expect(recovered.health.status).toBe("ready");
-		expect(recovered.refreshStatus).toBe("idle");
-		expect(probes).toBe(4);
-
-		await service.dispose();
-	});
-
 	it("keeps secret-bearing probe output out of the API view and SQLite", async () => {
 		const db = createTestDb();
 		const config = seedConfig(db);
@@ -763,7 +653,6 @@ describe("capability refresh service", () => {
 		const secret = "sk-secret-regression-token-9f3a";
 		const service = new CapabilityRefreshService(db);
 		const view = await service.refreshCapability(config, {
-			force: true,
 			now: CHECKED_AT_MS + 10_000,
 			probe: async () => {
 				throw new Error(
@@ -810,7 +699,6 @@ describe("capability refresh service", () => {
 
 		await expect(
 			service.refreshCapabilities([current, obsolete], {
-				force: true,
 				now: CHECKED_AT_MS,
 				probe: async (config) => {
 					if (config.id === obsolete.id) {
@@ -832,7 +720,6 @@ describe("capability refresh service", () => {
 		const config = seedConfig(db);
 		const service = new CapabilityRefreshService(db);
 		const view = await service.refreshCapability(config, {
-			force: true,
 			now: CHECKED_AT_MS,
 			probe: async () => liveSnapshot(config),
 		});
@@ -844,7 +731,6 @@ describe("capability refresh service", () => {
 			"inventory",
 			"inventoryOrigin",
 			"presetId",
-			"refreshStatus",
 		]);
 		expect(Object.keys(view.health).sort()).toEqual([
 			"auth",
@@ -887,7 +773,6 @@ describe("capability refresh service", () => {
 				message: null,
 			},
 			healthOrigin: "live",
-			refreshStatus: "idle",
 		});
 
 		await service.dispose();
@@ -918,7 +803,6 @@ describe("capability refresh service", () => {
 			persistSnapshot(db, config, storedAt);
 
 			const view = await refreshAgentCapability(db, config, {
-				force: true,
 				now: CHECKED_AT_MS,
 				probe: async () =>
 					liveSnapshot(config, {
@@ -960,7 +844,6 @@ describe("capability refresh service", () => {
 		persistSnapshot(db, config, storedAt);
 
 		const view = await refreshAgentCapability(db, config, {
-			force: true,
 			now: CHECKED_AT_MS,
 			probe: async () =>
 				liveSnapshot(config, {
@@ -979,13 +862,13 @@ describe("capability refresh service", () => {
 		).toHaveLength(1);
 	});
 
-	it("does not rewrite SQLite heartbeat for an unchanged launch probe inside the picker window", async () => {
+	it("persists every unchanged explicit refresh observation", async () => {
 		const db = createTestDb();
 		const config = seedConfig(db);
 		persistSnapshot(db, config);
-		const launchAt = CHECKED_AT_MS + CAPABILITY_LAUNCH_FRESHNESS_MS + 1_000;
+		const launchAt = CHECKED_AT_MS + 31_000;
 
-		await ensureFreshAgentCapability(db, config, {
+		await refreshAgentCapability(db, config, {
 			now: launchAt,
 			probe: async () =>
 				liveSnapshot(config, {
@@ -994,18 +877,18 @@ describe("capability refresh service", () => {
 		});
 
 		const row = rawSnapshotRow(db, config.id);
-		expect(row?.writtenAt).toBe(CHECKED_AT_MS);
-		expect(row?.statusCheckedAt).toBe(CHECKED_AT_MS);
-		expect(row?.inventoryCheckedAt).toBe(CHECKED_AT_MS);
+		expect(row?.writtenAt).toBe(launchAt);
+		expect(row?.statusCheckedAt).toBe(launchAt);
+		expect(row?.inventoryCheckedAt).toBe(launchAt);
 	});
 
-	it("writes immediately when a launch probe changes inventory", async () => {
+	it("writes immediately when an explicit refresh changes inventory", async () => {
 		const db = createTestDb();
 		const config = seedConfig(db);
 		persistSnapshot(db, config);
-		const launchAt = CHECKED_AT_MS + CAPABILITY_LAUNCH_FRESHNESS_MS + 1_000;
+		const launchAt = CHECKED_AT_MS + 31_000;
 
-		await ensureFreshAgentCapability(db, config, {
+		await refreshAgentCapability(db, config, {
 			now: launchAt,
 			probe: async () =>
 				liveSnapshot(config, {
@@ -1032,7 +915,7 @@ describe("capability refresh service", () => {
 		const config = seedConfig(db);
 		persistSnapshot(db, config);
 		const firstAt = CHECKED_AT_MS + 10_000;
-		const secondAt = firstAt + CAPABILITY_LAUNCH_FRESHNESS_MS + 1_000;
+		const secondAt = firstAt + 31_000;
 
 		const probe = async (
 			_config: AgentCapabilityConfig,
@@ -1048,14 +931,12 @@ describe("capability refresh service", () => {
 			});
 
 		await refreshAgentCapability(db, config, {
-			force: true,
 			now: firstAt,
 			probe,
 		});
 		expect(rawSnapshotRow(db, config.id)?.statusCheckedAt).toBe(firstAt);
 
 		await refreshAgentCapability(db, config, {
-			force: true,
 			now: secondAt,
 			probe,
 		});
@@ -1066,14 +947,14 @@ describe("capability refresh service", () => {
 		expect(row?.inventoryJson).toContain("model-1");
 	});
 
-	it("rejects an obsolete revision on the unchanged no-write launch path", async () => {
+	it("rejects an obsolete revision on an explicit refresh", async () => {
 		const db = createTestDb();
 		const config = seedConfig(db);
 		persistSnapshot(db, config);
-		const launchAt = CHECKED_AT_MS + CAPABILITY_LAUNCH_FRESHNESS_MS + 1_000;
+		const launchAt = CHECKED_AT_MS + 31_000;
 
 		await expect(
-			ensureFreshAgentCapability(db, config, {
+			refreshAgentCapability(db, config, {
 				now: launchAt,
 				probe: async () => {
 					db.update(schema.hostAgentConfigs)
@@ -1148,7 +1029,6 @@ wait
 			let abortedAt: number | null = null;
 			const refresh = service
 				.refreshCapability(config, {
-					force: true,
 					probe: async (_probeConfig, options) => {
 						try {
 							await runCommand(

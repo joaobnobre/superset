@@ -7,7 +7,7 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import type { AgentCapabilitySnapshot } from "../../../agent-capabilities/agent-capabilities";
-import { CAPABILITY_LAUNCH_FRESHNESS_MS } from "../../../agent-capabilities/capability-refresh-service";
+import { writeCapabilitySnapshotIfCurrentRevision } from "../../../agent-capabilities/capability-snapshot-repository";
 import type { HostDb } from "../../../db";
 import * as schema from "../../../db/schema";
 import type { HostServiceContext } from "../../../types";
@@ -17,8 +17,7 @@ import {
 	agentsRouter,
 	buildAgentCommandString,
 	buildTerminalAgentLaunch,
-	type CapabilityRefresher,
-	type ValidatedCapabilityLease,
+	type ValidatedLaunchSelection,
 	validateAgentContextWindowSelection,
 	validateAgentEffortSelection,
 	validateAgentLaunchSelection,
@@ -227,22 +226,54 @@ const CLAUDE_CONFIG_ID = "00000000-0000-0000-0000-00000000000a";
 const OPENCODE_CONFIG_ID = "00000000-0000-0000-0000-00000000000b";
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const CHECKED_AT = "2026-08-14T12:00:00.000Z";
-const NOW = Date.parse(CHECKED_AT);
 
-async function issueLease(
+function persistLaunchSnapshot(
+	db: HostDb,
+	config: { id: string; presetId: string; capabilityRevision?: number },
+	snapshot: AgentCapabilitySnapshot,
+): void {
+	const checkedAt = Date.parse(snapshot.checkedAt);
+	writeCapabilitySnapshotIfCurrentRevision(db, {
+		agentId: config.id,
+		presetId: config.presetId,
+		configRevision: config.capabilityRevision ?? 1,
+		inventory:
+			snapshot.modelSource === "none"
+				? null
+				: {
+						schemaVersion: 1,
+						agentId: config.id,
+						presetId: config.presetId,
+						configRevision: config.capabilityRevision ?? 1,
+						detectedVersion: snapshot.version,
+						modelSource:
+							snapshot.modelSource === "runtime" ? "runtime" : "curated",
+						models: snapshot.models,
+						inventoryCheckedAt:
+							snapshot.inventoryCheckedAt ?? snapshot.checkedAt,
+					},
+		status: snapshot.status,
+		installed: snapshot.installed,
+		auth: snapshot.auth,
+		inventoryCheckedAt: snapshot.modelSource === "none" ? null : checkedAt,
+		statusCheckedAt: checkedAt,
+		writtenAt: checkedAt,
+		errorKind: snapshot.errorKind ?? null,
+		message: snapshot.message,
+	});
+}
+
+async function validateFromSnapshot(
 	db: HostDb,
 	input: { agent: string } & AgentLaunchSelection,
 	snapshot: AgentCapabilitySnapshot,
-	now = NOW,
-): Promise<ValidatedCapabilityLease> {
-	const lease = await validateAgentLaunchSelection(
+): Promise<ValidatedLaunchSelection> {
+	persistLaunchSnapshot(
 		db,
-		input,
-		mockRefresh(snapshot),
-		{ now },
+		{ id: snapshot.agentId, presetId: snapshot.presetId },
+		snapshot,
 	);
-	if (!lease) throw new Error("Expected a validated capability lease");
-	return lease;
+	return validateAgentLaunchSelection(db, input);
 }
 
 function fallbackSnapshot(
@@ -286,12 +317,6 @@ function runtimeSnapshot(
 	};
 }
 
-function mockRefresh(snapshot: AgentCapabilitySnapshot): CapabilityRefresher {
-	return {
-		ensureFreshCapability: async () => snapshot,
-	};
-}
-
 describe("buildTerminalAgentLaunch", () => {
 	function seedConfig(db: ReturnType<typeof createTestDb>) {
 		db.insert(schema.hostAgentConfigs)
@@ -319,7 +344,7 @@ describe("buildTerminalAgentLaunch", () => {
 	it("resolves the agent config to a runnable command without a terminal", async () => {
 		const db = createTestDb();
 		const config = seedConfig(db);
-		const lease = await issueLease(
+		const validated = await validateFromSnapshot(
 			db,
 			{ agent: "claude" },
 			fallbackSnapshot(config),
@@ -331,8 +356,7 @@ describe("buildTerminalAgentLaunch", () => {
 				agent: "claude",
 				prompt: "do the thing",
 			},
-			lease,
-			{ now: NOW },
+			validated,
 		);
 		expect(launch.label).toBe("Claude");
 		expect(launch.fullCommand).toBe(
@@ -344,7 +368,7 @@ describe("buildTerminalAgentLaunch", () => {
 		const db = createTestDb();
 		const config = seedConfig(db);
 		const selection = { model: "claude-opus-5", speed: "fast" };
-		const lease = await issueLease(
+		const validated = await validateFromSnapshot(
 			db,
 			{ agent: "claude", ...selection },
 			fallbackSnapshot(config),
@@ -357,8 +381,7 @@ describe("buildTerminalAgentLaunch", () => {
 				prompt: "do the thing",
 				...selection,
 			},
-			lease,
-			{ now: NOW },
+			validated,
 		);
 		expect(launch.fullCommand).toBe(
 			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--model' 'claude-opus-5' '--settings' '{\"fastMode\":true}' 'do the thing'",
@@ -392,7 +415,7 @@ describe("buildTerminalAgentLaunch", () => {
 			effort: "high",
 			mode: "plan",
 		};
-		const lease = await issueLease(
+		const validated = await validateFromSnapshot(
 			db,
 			{ agent: "opencode", ...selection },
 			fallbackSnapshot(config),
@@ -405,8 +428,7 @@ describe("buildTerminalAgentLaunch", () => {
 				prompt: "do the thing",
 				...selection,
 			},
-			lease,
-			{ now: NOW },
+			validated,
 		);
 		expect(launch.fullCommand).toBe(
 			"'opencode' '--model' 'openai/gpt-5.6-sol' '--variant' 'high' '--agent' 'plan' 'do the thing'",
@@ -421,7 +443,7 @@ describe("buildTerminalAgentLaunch", () => {
 			effort: "ultracode",
 			speed: "fast",
 		};
-		const lease = await issueLease(
+		const validated = await validateFromSnapshot(
 			db,
 			{ agent: "claude", ...selection },
 			fallbackSnapshot(config),
@@ -434,8 +456,7 @@ describe("buildTerminalAgentLaunch", () => {
 				prompt: "do the thing",
 				...selection,
 			},
-			lease,
-			{ now: NOW },
+			validated,
 		);
 		expect(launch.fullCommand).toBe(
 			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--model' 'claude-opus-5' '--effort' 'xhigh' '--settings' '{\"fastMode\":true,\"ultracode\":true}' 'do the thing'",
@@ -446,7 +467,7 @@ describe("buildTerminalAgentLaunch", () => {
 		const db = createTestDb();
 		const config = seedConfig(db);
 		const selection = { model: "claude-opus-5" };
-		const lease = await issueLease(
+		const validated = await validateFromSnapshot(
 			db,
 			{ agent: "claude", ...selection },
 			fallbackSnapshot(config),
@@ -459,8 +480,7 @@ describe("buildTerminalAgentLaunch", () => {
 				prompt: "ultrathink about this change",
 				...selection,
 			},
-			lease,
-			{ now: NOW },
+			validated,
 		);
 		expect(launch.fullCommand).toBe(
 			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--model' 'claude-opus-5' 'ultrathink about this change'",
@@ -471,7 +491,7 @@ describe("buildTerminalAgentLaunch", () => {
 		const db = createTestDb();
 		const config = seedConfig(db);
 		const selection = { model: "claude-haiku-4-5", effort: "on" };
-		const lease = await issueLease(
+		const validated = await validateFromSnapshot(
 			db,
 			{ agent: "claude", ...selection },
 			fallbackSnapshot(config),
@@ -484,8 +504,7 @@ describe("buildTerminalAgentLaunch", () => {
 				prompt: "do the thing",
 				...selection,
 			},
-			lease,
-			{ now: NOW },
+			validated,
 		);
 		expect(launch.fullCommand).toBe(
 			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--model' 'claude-haiku-4-5' '--settings' '{\"alwaysThinkingEnabled\":true}' 'do the thing'",
@@ -496,7 +515,7 @@ describe("buildTerminalAgentLaunch", () => {
 		const db = createTestDb();
 		const config = seedConfig(db);
 		const selection = { model: "claude-opus-5", contextWindow: "1m" };
-		const lease = await issueLease(
+		const validated = await validateFromSnapshot(
 			db,
 			{ agent: "claude", ...selection },
 			fallbackSnapshot(config),
@@ -509,8 +528,7 @@ describe("buildTerminalAgentLaunch", () => {
 				prompt: "do the thing",
 				...selection,
 			},
-			lease,
-			{ now: NOW },
+			validated,
 		);
 		expect(launch.fullCommand).toBe(
 			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--model' 'claude-opus-5[1m]' 'do the thing'",
@@ -520,7 +538,7 @@ describe("buildTerminalAgentLaunch", () => {
 	it("resumes a previous session with an empty prompt", async () => {
 		const db = createTestDb();
 		const config = seedConfig(db);
-		const lease = await issueLease(
+		const validated = await validateFromSnapshot(
 			db,
 			{ agent: "claude" },
 			fallbackSnapshot(config),
@@ -533,8 +551,7 @@ describe("buildTerminalAgentLaunch", () => {
 				prompt: "",
 				resumeSessionId: "abc-123",
 			},
-			lease,
-			{ now: NOW },
+			validated,
 		);
 		expect(launch.fullCommand).toBe(
 			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--resume' 'abc-123'",
@@ -562,7 +579,7 @@ describe("buildTerminalAgentLaunch", () => {
 				displayOrder: 1,
 			})
 			.run();
-		const lease = await issueLease(
+		const validated = await validateFromSnapshot(
 			db,
 			{ agent: "custom" },
 			fallbackSnapshot(config),
@@ -576,8 +593,7 @@ describe("buildTerminalAgentLaunch", () => {
 					prompt: "",
 					resumeSessionId: "abc-123",
 				},
-				lease,
-				{ now: NOW },
+				validated,
 			),
 		).toThrow(/does not support resuming a session by id/);
 	});
@@ -585,7 +601,7 @@ describe("buildTerminalAgentLaunch", () => {
 	it("throws NOT_FOUND for an unknown agent", async () => {
 		const db = createTestDb();
 		const config = seedConfig(db);
-		const lease = await issueLease(
+		const validated = await validateFromSnapshot(
 			db,
 			{ agent: "claude" },
 			fallbackSnapshot(config),
@@ -598,16 +614,15 @@ describe("buildTerminalAgentLaunch", () => {
 					agent: "nope",
 					prompt: "p",
 				},
-				lease,
-				{ now: NOW },
+				validated,
 			),
 		).toThrow(/No host agent config matching 'nope'/);
 	});
 
-	it("rejects a model-A lease used to build model B", async () => {
+	it("rejects a model-A validation used to build model B", async () => {
 		const db = createTestDb();
 		const config = seedConfig(db);
-		const lease = await issueLease(
+		const validated = await validateFromSnapshot(
 			db,
 			{ agent: "claude", model: "claude-fable-5" },
 			fallbackSnapshot(config),
@@ -621,8 +636,7 @@ describe("buildTerminalAgentLaunch", () => {
 					prompt: "do the thing",
 					model: "claude-opus-5",
 				},
-				lease,
-				{ now: NOW },
+				validated,
 			);
 			throw new Error("Expected launch to fail");
 		} catch (error) {
@@ -634,10 +648,10 @@ describe("buildTerminalAgentLaunch", () => {
 		}
 	});
 
-	it("rejects a lease after the agent config revision changes", async () => {
+	it("rejects a validated selection after the agent config revision changes", async () => {
 		const db = createTestDb();
 		const config = seedConfig(db);
-		const lease = await issueLease(
+		const validated = await validateFromSnapshot(
 			db,
 			{ agent: "claude", model: "claude-opus-5" },
 			fallbackSnapshot(config),
@@ -655,8 +669,7 @@ describe("buildTerminalAgentLaunch", () => {
 					prompt: "do the thing",
 					model: "claude-opus-5",
 				},
-				lease,
-				{ now: NOW },
+				validated,
 			);
 			throw new Error("Expected launch to fail");
 		} catch (error) {
@@ -664,36 +677,6 @@ describe("buildTerminalAgentLaunch", () => {
 			expect((error as TRPCError).code).toBe("PRECONDITION_FAILED");
 			expect((error as TRPCError).cause).toMatchObject({
 				kind: "config_changed",
-			});
-		}
-	});
-
-	it("rejects an expired lease", async () => {
-		const db = createTestDb();
-		const config = seedConfig(db);
-		const lease = await issueLease(
-			db,
-			{ agent: "claude", model: "claude-opus-5" },
-			fallbackSnapshot(config),
-		);
-		try {
-			buildTerminalAgentLaunch(
-				db,
-				{
-					workspaceId: WORKSPACE_ID,
-					agent: "claude",
-					prompt: "do the thing",
-					model: "claude-opus-5",
-				},
-				lease,
-				{ now: lease.expiresAt },
-			);
-			throw new Error("Expected launch to fail");
-		} catch (error) {
-			expect(error).toBeInstanceOf(TRPCError);
-			expect((error as TRPCError).code).toBe("PRECONDITION_FAILED");
-			expect((error as TRPCError).cause).toMatchObject({
-				kind: "expired_lease",
 			});
 		}
 	});
@@ -721,7 +704,7 @@ describe("buildTerminalAgentLaunch", () => {
 			})
 			.run();
 		const selection = { model: "provider/model", effort: "max" };
-		const lease = await issueLease(
+		const validated = await validateFromSnapshot(
 			db,
 			{ agent: "pi", ...selection },
 			runtimeSnapshot(config, [
@@ -744,8 +727,7 @@ describe("buildTerminalAgentLaunch", () => {
 				prompt: "do the thing",
 				...selection,
 			},
-			lease,
-			{ now: NOW },
+			validated,
 		);
 		expect(launch.fullCommand).toBe(
 			"'pi' '--model' 'provider/model' '--thinking' 'max' 'do the thing'",
@@ -775,7 +757,7 @@ describe("buildTerminalAgentLaunch", () => {
 			})
 			.run();
 		const selection = { model: "gpt-6-codex" };
-		const lease = await issueLease(
+		const validated = await validateFromSnapshot(
 			db,
 			{ agent: "codex", ...selection },
 			runtimeSnapshot(config, [
@@ -794,8 +776,7 @@ describe("buildTerminalAgentLaunch", () => {
 				prompt: "do the thing",
 				...selection,
 			},
-			lease,
-			{ now: NOW },
+			validated,
 		);
 		expect(launch.fullCommand).toBe(
 			"'codex' '--model' 'gpt-6-codex' 'do the thing'",
@@ -806,7 +787,7 @@ describe("buildTerminalAgentLaunch", () => {
 		const db = createTestDb();
 		const config = seedConfig(db);
 		await expect(
-			issueLease(
+			validateFromSnapshot(
 				db,
 				{ agent: "claude", model: "retired-model" },
 				runtimeSnapshot(config, [
@@ -855,7 +836,7 @@ describe("buildTerminalAgentLaunch", () => {
 				reasoning: { state: "unsupported" },
 			},
 		]);
-		const lease = await issueLease(
+		const validated = await validateFromSnapshot(
 			db,
 			{ agent: "vibe", ...selection },
 			snapshot,
@@ -868,14 +849,17 @@ describe("buildTerminalAgentLaunch", () => {
 				prompt: "do the thing",
 				...selection,
 			},
-			lease,
-			{ now: NOW },
+			validated,
 		);
 		expect(launch.fullCommand).toBe(
 			"VIBE_ACTIVE_MODEL='vibe-runtime-model' 'vibe' 'do the thing'",
 		);
 		await expect(
-			issueLease(db, { agent: "vibe", model: "mistral-medium-3.5" }, snapshot),
+			validateFromSnapshot(
+				db,
+				{ agent: "vibe", model: "mistral-medium-3.5" },
+				snapshot,
+			),
 		).rejects.toThrow(/Model "mistral-medium-3.5" is not available/);
 	});
 });
@@ -1019,196 +1003,85 @@ describe("validateAgentLaunchSelection", () => {
 		return config;
 	}
 
-	it("issues a selection-bound lease after a live ready check", async () => {
+	it("validates a runtime model from the persisted inventory", async () => {
 		const db = createTestDb();
 		const config = seedClaude(db);
-		const lease = await validateAgentLaunchSelection(
+		persistLaunchSnapshot(
 			db,
-			{ agent: "claude", model: "claude-opus-5", speed: "fast" },
-			mockRefresh(
-				runtimeSnapshot(config, [
-					{
-						id: "claude-opus-5",
-						label: "Opus 5",
-						reasoning: { state: "unknown" },
-					},
-				]),
-			),
-			{ now: NOW },
-		);
-		expect(lease).toMatchObject({
-			agentId: config.id,
-			presetId: "claude",
-			configRevision: 1,
-			inventoryCheckedAt: CHECKED_AT,
-			selection: { model: "claude-opus-5", speed: "fast" },
-			allowedModelIds: ["claude-opus-5"],
-		});
-		expect(lease?.expiresAt).toBe(NOW + CAPABILITY_LAUNCH_FRESHNESS_MS);
-	});
-
-	it("binds expiry to the live inventory timestamp instead of resetting the window", async () => {
-		const db = createTestDb();
-		const config = seedClaude(db);
-		const staleCheckedAt = new Date(NOW - 20_000).toISOString();
-		const snapshot = runtimeSnapshot(
 			config,
-			[
+			runtimeSnapshot(config, [
 				{
 					id: "claude-opus-5",
 					label: "Opus 5",
 					reasoning: { state: "unknown" },
 				},
-			],
-			{ checkedAt: staleCheckedAt, inventoryCheckedAt: staleCheckedAt },
+			]),
 		);
-		const first = await validateAgentLaunchSelection(
+
+		const validated = await validateAgentLaunchSelection(db, {
+			agent: "claude",
+			model: "claude-opus-5",
+			speed: "fast",
+		});
+
+		expect(validated).toMatchObject({
+			agentId: config.id,
+			presetId: "claude",
+			configRevision: 1,
+			selection: { model: "claude-opus-5", speed: "fast" },
+			allowedModelIds: ["claude-opus-5"],
+		});
+	});
+
+	it("does not block launch on persisted authentication health", async () => {
+		const db = createTestDb();
+		const config = seedClaude(db);
+		persistLaunchSnapshot(
 			db,
-			{ agent: "claude", model: "claude-opus-5" },
-			mockRefresh(snapshot),
-			{ now: NOW },
+			config,
+			runtimeSnapshot(
+				config,
+				[
+					{
+						id: "claude-opus-5",
+						label: "Opus 5",
+						reasoning: { state: "unknown" },
+					},
+				],
+				{
+					status: "authentication_required",
+					auth: "unauthenticated",
+				},
+			),
 		);
-		const later = await validateAgentLaunchSelection(
-			db,
-			{ agent: "claude", model: "claude-opus-5" },
-			mockRefresh(snapshot),
-			{ now: NOW + 5_000 },
-		);
-		expect(first?.expiresAt).toBe(
-			NOW - 20_000 + CAPABILITY_LAUNCH_FRESHNESS_MS,
-		);
-		expect(later?.expiresAt).toBe(first?.expiresAt);
+
+		await expect(
+			validateAgentLaunchSelection(db, {
+				agent: "claude",
+				model: "claude-opus-5",
+			}),
+		).resolves.toMatchObject({ agentId: config.id });
 	});
 
-	it("rejects a snapshot bound to a different agent identity", async () => {
+	it("allows a curated model when no snapshot exists", async () => {
 		const db = createTestDb();
 		const config = seedClaude(db);
-		try {
-			await validateAgentLaunchSelection(
-				db,
-				{ agent: "claude", model: "claude-opus-5" },
-				mockRefresh(
-					runtimeSnapshot(
-						config,
-						[
-							{
-								id: "claude-opus-5",
-								label: "Opus 5",
-								reasoning: { state: "unknown" },
-							},
-						],
-						{
-							agentId: "00000000-0000-0000-0000-000000000099",
-						},
-					),
-				),
-				{ now: NOW },
-			);
-			throw new Error("Expected validation to fail");
-		} catch (error) {
-			expect(error).toBeInstanceOf(TRPCError);
-			expect((error as TRPCError).cause).toMatchObject({
-				kind: "config_changed",
-			});
-		}
+		await expect(
+			validateAgentLaunchSelection(db, {
+				agent: "claude",
+				model: "claude-opus-5",
+			}),
+		).resolves.toMatchObject({ agentId: config.id });
 	});
 
-	it("rejects an explicit runtime model when the preset has no trusted transport", async () => {
+	it("rejects an unknown runtime-only model when no snapshot exists", async () => {
 		const db = createTestDb();
-		const config = {
-			id: "00000000-0000-0000-0000-0000000000ff",
-			presetId: "custom",
-			label: "My Agent",
-			capabilityRevision: 1,
-		};
-		db.insert(schema.hostAgentConfigs)
-			.values({
-				id: config.id,
-				presetId: config.presetId,
-				label: config.label,
-				command: "my-agent",
-				argsJson: "[]",
-				promptTransport: "argv",
-				promptArgsJson: "[]",
-				resumeArgsJson: "[]",
-				envJson: "{}",
-				capabilityRevision: 1,
-				displayOrder: 0,
-			})
-			.run();
+		seedClaude(db);
 		try {
-			await validateAgentLaunchSelection(
-				db,
-				{ agent: "custom", model: "runtime-only-model" },
-				mockRefresh(
-					runtimeSnapshot(config, [
-						{
-							id: "runtime-only-model",
-							label: "Runtime Only",
-							reasoning: { state: "unknown" },
-						},
-					]),
-				),
-				{ now: NOW },
-			);
-			throw new Error("Expected validation to fail");
-		} catch (error) {
-			expect(error).toBeInstanceOf(TRPCError);
-			expect((error as TRPCError).cause).toMatchObject({
-				kind: "unsupported_trait",
+			await validateAgentLaunchSelection(db, {
+				agent: "claude",
+				model: "runtime-only-model",
 			});
-		}
-	});
-
-	it("rejects a missing live capability timestamp", async () => {
-		const db = createTestDb();
-		const config = seedClaude(db);
-		try {
-			await validateAgentLaunchSelection(
-				db,
-				{ agent: "claude", model: "claude-opus-5" },
-				mockRefresh(
-					runtimeSnapshot(
-						config,
-						[
-							{
-								id: "claude-opus-5",
-								label: "Opus 5",
-								reasoning: { state: "unknown" },
-							},
-						],
-						{ checkedAt: "", inventoryCheckedAt: null },
-					),
-				),
-				{ now: NOW },
-			);
-			throw new Error("Expected validation to fail");
-		} catch (error) {
-			expect(error).toBeInstanceOf(TRPCError);
-			expect((error as TRPCError).cause).toMatchObject({
-				kind: "unavailable",
-			});
-		}
-	});
-
-	it("rejects a retired runtime model before construction", async () => {
-		const db = createTestDb();
-		const config = seedClaude(db);
-		try {
-			await validateAgentLaunchSelection(
-				db,
-				{ agent: "claude", model: "retired-model" },
-				mockRefresh(
-					runtimeSnapshot(config, [
-						{
-							id: "claude-opus-5",
-							label: "Opus 5",
-							reasoning: { state: "unknown" },
-						},
-					]),
-				),
-				{ now: NOW },
-			);
 			throw new Error("Expected validation to fail");
 		} catch (error) {
 			expect(error).toBeInstanceOf(TRPCError);
@@ -1241,21 +1114,23 @@ describe("validateAgentLaunchSelection", () => {
 				displayOrder: 0,
 			})
 			.run();
+		persistLaunchSnapshot(
+			db,
+			config,
+			runtimeSnapshot(config, [
+				{
+					id: "gpt-5.6-sol",
+					label: "GPT-5.6 Sol",
+					reasoning: { state: "unsupported" },
+				},
+			]),
+		);
 		try {
-			await validateAgentLaunchSelection(
-				db,
-				{ agent: "codex", model: "gpt-5.6-sol", effort: "high" },
-				mockRefresh(
-					runtimeSnapshot(config, [
-						{
-							id: "gpt-5.6-sol",
-							label: "GPT-5.6 Sol",
-							reasoning: { state: "unsupported" },
-						},
-					]),
-				),
-				{ now: NOW },
-			);
+			await validateAgentLaunchSelection(db, {
+				agent: "codex",
+				model: "gpt-5.6-sol",
+				effort: "high",
+			});
 			throw new Error("Expected validation to fail");
 		} catch (error) {
 			expect(error).toBeInstanceOf(TRPCError);
@@ -1278,16 +1153,20 @@ describe("agents.run launch contract", () => {
 	}
 
 	function createRunCaller(db: HostDb, snapshot: AgentCapabilitySnapshot) {
-		const context = {
+		persistLaunchSnapshot(
 			db,
-			isAuthenticated: true,
-			capabilityRefresh: mockRefresh({
+			{ id: snapshot.agentId, presetId: snapshot.presetId },
+			{
 				...snapshot,
 				checkedAt: new Date().toISOString(),
 				inventoryCheckedAt: new Date().toISOString(),
-			}),
+			},
+		);
+		const context = {
+			db,
+			isAuthenticated: true,
 		};
-		// SAFETY: This router test exercises only the three context services supplied above.
+		// SAFETY: This router test exercises only the context services supplied above.
 		return agentsRouter.createCaller(context as HostServiceContext);
 	}
 

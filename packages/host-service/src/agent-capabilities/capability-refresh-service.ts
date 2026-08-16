@@ -1,12 +1,9 @@
-import { randomUUID } from "node:crypto";
 import type { HostDb } from "../db";
 import {
 	type AgentCapabilityConfig,
 	type AgentCapabilityErrorKind,
 	AgentCapabilityProbeAbortedError,
 	type AgentCapabilitySnapshot,
-	clearAgentCapabilityCacheNamespace,
-	getCachedAgentCapability,
 	inspectAgentCapability,
 } from "./agent-capabilities";
 import {
@@ -22,11 +19,7 @@ import {
 	writeCapabilitySnapshotIfCurrentRevision,
 } from "./capability-snapshot-repository";
 
-export const CAPABILITY_PICKER_FRESHNESS_MS = 5 * 60 * 1_000;
-export const CAPABILITY_LAUNCH_FRESHNESS_MS = 30_000;
 export const CAPABILITY_REFRESH_CONCURRENCY = 4;
-export const CAPABILITY_RETRY_BASE_DELAY_MS = 30_000;
-export const CAPABILITY_RETRY_MAX_DELAY_MS = 5 * 60_000;
 
 export interface RevisionedAgentCapabilityConfig extends AgentCapabilityConfig {
 	configRevision: number;
@@ -55,34 +48,24 @@ export interface AgentCapabilityView {
 	inventoryOrigin: "live" | "persisted" | "none";
 	health: AgentHealthObservation;
 	healthOrigin: "live" | "persisted" | "none";
-	refreshStatus: "idle" | "refreshing" | "backoff";
 }
 
 type CapabilityProbe = (
 	config: AgentCapabilityConfig,
-	options: { force?: boolean; now?: number; signal?: AbortSignal },
+	options: { now?: number; signal?: AbortSignal },
 ) => Promise<AgentCapabilitySnapshot>;
 
 interface CapabilityRefreshState {
 	abortController: AbortController;
 	disposed: boolean;
-	cacheNamespace: string;
 	refreshInFlight: Map<string, Promise<AgentCapabilityView>>;
-	backoffByKey: Map<string, { failures: number; nextRetryAt: number }>;
-	launchLeases: Map<
-		string,
-		{ expiresAt: number; snapshot: AgentCapabilitySnapshot }
-	>;
 }
 
 function createCapabilityRefreshState(): CapabilityRefreshState {
 	return {
 		abortController: new AbortController(),
 		disposed: false,
-		cacheNamespace: randomUUID(),
 		refreshInFlight: new Map(),
-		backoffByKey: new Map(),
-		launchLeases: new Map(),
 	};
 }
 
@@ -90,99 +73,6 @@ let defaultRefreshState = createCapabilityRefreshState();
 
 function refreshKey(config: RevisionedAgentCapabilityConfig): string {
 	return `${config.id}:${config.configRevision}`;
-}
-
-function isTransientFailure(view: AgentCapabilityView): boolean {
-	return (
-		view.health.errorKind === "timeout" ||
-		view.health.errorKind === "process_failure" ||
-		view.health.errorKind === "parse_failure"
-	);
-}
-
-function isTransientErrorKind(
-	errorKind: AgentCapabilityErrorKind | null,
-): boolean {
-	return (
-		errorKind === "timeout" ||
-		errorKind === "process_failure" ||
-		errorKind === "parse_failure"
-	);
-}
-
-function recordBackoff(
-	state: CapabilityRefreshState,
-	key: string,
-	view: AgentCapabilityView,
-	now: number,
-): void {
-	if (!isTransientFailure(view)) {
-		state.backoffByKey.delete(key);
-		return;
-	}
-	const failures = (state.backoffByKey.get(key)?.failures ?? 0) + 1;
-	const delay = Math.min(
-		CAPABILITY_RETRY_BASE_DELAY_MS * 2 ** (failures - 1),
-		CAPABILITY_RETRY_MAX_DELAY_MS,
-	);
-	state.backoffByKey.set(key, { failures, nextRetryAt: now + delay });
-}
-
-function inventorySourceToSnapshotSource(
-	source: AgentCapabilityInventory["modelSource"],
-): AgentCapabilitySnapshot["modelSource"] {
-	return source === "curated" ? "fallback" : "runtime";
-}
-
-function sameSemanticInventory(
-	left: AgentCapabilityInventory | null,
-	right: AgentCapabilityInventory | null,
-): boolean {
-	if (left === right) return true;
-	if (left === null || right === null) return false;
-	return (
-		left.schemaVersion === right.schemaVersion &&
-		left.agentId === right.agentId &&
-		left.presetId === right.presetId &&
-		left.configRevision === right.configRevision &&
-		left.detectedVersion === right.detectedVersion &&
-		left.modelSource === right.modelSource &&
-		JSON.stringify(left.models) === JSON.stringify(right.models)
-	);
-}
-
-function isSuccessfulNonErrorHealth(next: {
-	status: AgentHealthObservation["status"];
-	errorKind: AgentHealthObservation["errorKind"];
-}): boolean {
-	return next.status === "ready" && next.errorKind === null;
-}
-
-function shouldPersistCapabilitySnapshot(
-	previous: PersistedAgentCapabilitySnapshot | undefined,
-	next: {
-		inventory: AgentCapabilityInventory | null;
-		status: AgentHealthObservation["status"];
-		installed: boolean | null;
-		auth: AgentHealthObservation["auth"];
-		errorKind: AgentHealthObservation["errorKind"];
-		message: string | null;
-		resolverSource: PersistedAgentCapabilitySnapshot["resolverSource"];
-	},
-	now: number,
-): boolean {
-	if (!previous) return true;
-	const materialChange =
-		!sameSemanticInventory(previous.inventory, next.inventory) ||
-		previous.status !== next.status ||
-		previous.installed !== next.installed ||
-		previous.auth !== next.auth ||
-		previous.errorKind !== next.errorKind ||
-		previous.message !== next.message ||
-		previous.resolverSource !== next.resolverSource;
-	if (materialChange) return true;
-	if (!isSuccessfulNonErrorHealth(next)) return true;
-	return now - previous.statusCheckedAt >= CAPABILITY_PICKER_FRESHNESS_MS;
 }
 
 function inventoryOrigin(
@@ -196,7 +86,6 @@ function inventoryOrigin(
 
 export function persistedCapabilityToView(
 	snapshot: PersistedAgentCapabilitySnapshot,
-	refreshStatus: AgentCapabilityView["refreshStatus"] = "idle",
 	now = Date.now(),
 ): AgentCapabilityView {
 	const inventory = displayableCapabilityInventory(snapshot.inventory, now);
@@ -214,33 +103,6 @@ export function persistedCapabilityToView(
 			message: snapshot.message,
 		},
 		healthOrigin: "persisted",
-		refreshStatus,
-	};
-}
-
-function viewToLaunchSnapshot(
-	view: AgentCapabilityView,
-): AgentCapabilitySnapshot {
-	return {
-		agentId: view.agentId,
-		presetId: view.presetId,
-		status:
-			view.health.status === "unknown" ? "unavailable" : view.health.status,
-		installed: view.health.installed ?? false,
-		auth: view.health.auth,
-		version: view.inventory?.detectedVersion ?? null,
-		modelSource: view.inventory
-			? inventorySourceToSnapshotSource(view.inventory.modelSource)
-			: "none",
-		models: view.inventory?.models ?? [],
-		message: view.health.message,
-		checkedAt: view.health.checkedAt,
-		errorKind: view.health.errorKind,
-		inventoryCheckedAt: view.inventory?.inventoryCheckedAt ?? null,
-		inventoryOrigin: view.inventoryOrigin,
-		healthOrigin:
-			view.healthOrigin === "none" ? "persisted" : view.healthOrigin,
-		refreshStatus: view.refreshStatus,
 	};
 }
 
@@ -285,11 +147,10 @@ function isolatedProcessFailureView(
 				message: SANITIZED_CAPABILITY_MESSAGES.processFailure,
 			},
 			healthOrigin: "live",
-			refreshStatus: "idle",
 		};
 	}
 	return {
-		...persistedCapabilityToView(previous, "idle", now),
+		...persistedCapabilityToView(previous, now),
 		health: {
 			status: "unavailable",
 			installed: previous.installed,
@@ -299,7 +160,6 @@ function isolatedProcessFailureView(
 			message: SANITIZED_CAPABILITY_MESSAGES.processFailure,
 		},
 		healthOrigin: "live",
-		refreshStatus: "idle",
 	};
 }
 
@@ -310,7 +170,7 @@ export function readPersistedCapabilitySnapshots(
 	return listCapabilitySnapshots(db, {
 		now,
 		maxDisplayAgeMs: CAPABILITY_SNAPSHOT_DISPLAY_MAX_AGE_MS,
-	}).map((snapshot) => persistedCapabilityToView(snapshot, "idle", now));
+	}).map((snapshot) => persistedCapabilityToView(snapshot, now));
 }
 
 function inventoryFromLiveSnapshot(
@@ -336,15 +196,11 @@ async function refreshCapabilityUncoalesced(
 	previous: PersistedAgentCapabilitySnapshot | undefined,
 	now: number,
 	probe: CapabilityProbe,
-	cacheNamespace: string,
 	signal: AbortSignal,
 ): Promise<AgentCapabilityView> {
 	let live: AgentCapabilitySnapshot;
 	try {
-		live = await probe(
-			{ ...config, cacheNamespace },
-			{ force: true, now, signal },
-		);
+		live = await probe(config, { now, signal });
 	} catch (error) {
 		if (signal.aborted || error instanceof AgentCapabilityProbeAbortedError) {
 			throw new AgentCapabilityProbeAbortedError();
@@ -395,19 +251,6 @@ async function refreshCapabilityUncoalesced(
 		? Date.parse(inventory.inventoryCheckedAt)
 		: null;
 	const message = sanitizedDiagnosticMessage(live);
-	const persist = shouldPersistCapabilitySnapshot(
-		previous,
-		{
-			inventory,
-			status: live.status,
-			installed: live.installed,
-			auth: live.auth,
-			errorKind: live.errorKind ?? null,
-			message,
-			resolverSource: live.resolverSource ?? null,
-		},
-		now,
-	);
 	const written = writeCapabilitySnapshotIfCurrentRevision(
 		db,
 		{
@@ -425,7 +268,7 @@ async function refreshCapabilityUncoalesced(
 			message,
 			resolverSource: live.resolverSource ?? null,
 		},
-		{ persist },
+		{ persist: true },
 	);
 	if (!written) throw new ObsoleteCapabilityRefreshError(config.id);
 	const displayInventory = displayableCapabilityInventory(inventory, now);
@@ -443,7 +286,6 @@ async function refreshCapabilityUncoalesced(
 			message,
 		},
 		healthOrigin: "live",
-		refreshStatus: "idle",
 	};
 }
 
@@ -452,7 +294,6 @@ function refreshAgentCapabilityWithState(
 	config: RevisionedAgentCapabilityConfig,
 	state: CapabilityRefreshState,
 	options: {
-		force?: boolean;
 		now?: number;
 		probe?: CapabilityProbe;
 	} = {},
@@ -467,19 +308,6 @@ function refreshAgentCapabilityWithState(
 		includeHiddenInventory: true,
 	})[0];
 	const key = refreshKey(config);
-	const backoff = state.backoffByKey.get(key);
-	if (!options.force && previous && backoff && backoff.nextRetryAt > now) {
-		return Promise.resolve(persistedCapabilityToView(previous, "backoff", now));
-	}
-	if (
-		!options.force &&
-		previous &&
-		!isTransientErrorKind(previous.errorKind) &&
-		now - previous.statusCheckedAt < CAPABILITY_PICKER_FRESHNESS_MS
-	) {
-		return Promise.resolve(persistedCapabilityToView(previous, "idle", now));
-	}
-
 	const existing = state.refreshInFlight.get(key);
 	if (existing) return existing;
 	const refresh = refreshCapabilityUncoalesced(
@@ -488,22 +316,12 @@ function refreshAgentCapabilityWithState(
 		previous,
 		now,
 		options.probe ?? inspectAgentCapability,
-		state.cacheNamespace,
 		state.abortController.signal,
-	)
-		.then((view) => {
-			recordBackoff(state, key, view, now);
-			state.launchLeases.set(key, {
-				expiresAt: now + CAPABILITY_LAUNCH_FRESHNESS_MS,
-				snapshot: viewToLaunchSnapshot(view),
-			});
-			return view;
-		})
-		.finally(() => {
-			if (state.refreshInFlight.get(key) === refresh) {
-				state.refreshInFlight.delete(key);
-			}
-		});
+	).finally(() => {
+		if (state.refreshInFlight.get(key) === refresh) {
+			state.refreshInFlight.delete(key);
+		}
+	});
 	state.refreshInFlight.set(key, refresh);
 	return refresh;
 }
@@ -512,7 +330,6 @@ export function refreshAgentCapability(
 	db: HostDb,
 	config: RevisionedAgentCapabilityConfig,
 	options: {
-		force?: boolean;
 		now?: number;
 		probe?: CapabilityProbe;
 	} = {},
@@ -525,56 +342,11 @@ export function refreshAgentCapability(
 	);
 }
 
-/** Return a recent live result or probe only the selected launch agent. */
-function ensureFreshAgentCapabilityWithState(
-	db: HostDb,
-	config: RevisionedAgentCapabilityConfig,
-	state: CapabilityRefreshState,
-	options: { now?: number; probe?: CapabilityProbe } = {},
-): Promise<AgentCapabilitySnapshot> {
-	if (state.disposed) {
-		return Promise.reject(new AgentCapabilityProbeAbortedError());
-	}
-	const now = options.now ?? Date.now();
-	const key = refreshKey(config);
-	const lease = state.launchLeases.get(key);
-	if (lease) {
-		if (lease.expiresAt > now) return Promise.resolve(lease.snapshot);
-		state.launchLeases.delete(key);
-	}
-
-	const cached = getCachedAgentCapability(
-		{ ...config, cacheNamespace: state.cacheNamespace },
-		now,
-	);
-	if (cached) return Promise.resolve(cached);
-
-	return refreshAgentCapabilityWithState(db, config, state, {
-		force: true,
-		now,
-		probe: options.probe,
-	}).then(viewToLaunchSnapshot);
-}
-
-export function ensureFreshAgentCapability(
-	db: HostDb,
-	config: RevisionedAgentCapabilityConfig,
-	options: { now?: number; probe?: CapabilityProbe } = {},
-): Promise<AgentCapabilitySnapshot> {
-	return ensureFreshAgentCapabilityWithState(
-		db,
-		config,
-		defaultRefreshState,
-		options,
-	);
-}
-
 async function refreshAgentCapabilitiesWithState(
 	db: HostDb,
 	configs: RevisionedAgentCapabilityConfig[],
 	state: CapabilityRefreshState,
 	options: {
-		force?: boolean;
 		now?: number;
 		concurrency?: number;
 		probe?: CapabilityProbe;
@@ -601,7 +373,6 @@ async function refreshAgentCapabilitiesWithState(
 					config,
 					state,
 					{
-						force: options.force,
 						now: options.now,
 						probe: options.probe,
 					},
@@ -636,7 +407,6 @@ export function refreshAgentCapabilities(
 	db: HostDb,
 	configs: RevisionedAgentCapabilityConfig[],
 	options: {
-		force?: boolean;
 		now?: number;
 		concurrency?: number;
 		probe?: CapabilityProbe;
@@ -661,7 +431,7 @@ export class CapabilityRefreshService {
 
 	refreshCapability(
 		config: RevisionedAgentCapabilityConfig,
-		options: { force?: boolean; now?: number; probe?: CapabilityProbe } = {},
+		options: { now?: number; probe?: CapabilityProbe } = {},
 	): Promise<AgentCapabilityView> {
 		return refreshAgentCapabilityWithState(
 			this.db,
@@ -674,7 +444,6 @@ export class CapabilityRefreshService {
 	refreshCapabilities(
 		configs: RevisionedAgentCapabilityConfig[],
 		options: {
-			force?: boolean;
 			now?: number;
 			concurrency?: number;
 			probe?: CapabilityProbe;
@@ -688,27 +457,12 @@ export class CapabilityRefreshService {
 		);
 	}
 
-	ensureFreshCapability(
-		config: RevisionedAgentCapabilityConfig,
-		options: { now?: number; probe?: CapabilityProbe } = {},
-	): Promise<AgentCapabilitySnapshot> {
-		return ensureFreshAgentCapabilityWithState(
-			this.db,
-			config,
-			this.#state,
-			options,
-		);
-	}
-
 	async dispose(): Promise<void> {
 		if (this.#state.disposed) return;
 		this.#state.disposed = true;
 		this.#state.abortController.abort();
 		await Promise.allSettled(this.#state.refreshInFlight.values());
-		clearAgentCapabilityCacheNamespace(this.#state.cacheNamespace);
 		this.#state.refreshInFlight.clear();
-		this.#state.backoffByKey.clear();
-		this.#state.launchLeases.clear();
 	}
 }
 

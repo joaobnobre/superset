@@ -22,14 +22,15 @@ local CLI snapshot cache.
 - [x] Use one reasoning resolver in picker and launch validation, including
   runtime-only options such as Pi `max`.
 - [x] Add revision-safe SQLite persistence and strict snapshot decoding.
-- [x] Split cached reads from stale-only refresh and remove closed-surface probes.
-- [x] Render cache-first and centralize first-use/focus refresh with a 5-minute
-  stale window per host.
-- [x] Add short-lived launch freshness leases across every launch path.
+- [x] Split cached reads from host-owned refresh and remove closed-surface probes.
+- [x] Render cache-first from persisted snapshots; each renderer session owns
+  one asynchronous revalidation per selected host, including after `Ctrl+R`.
+- [x] Validate launch selections from persisted/runtime or curated trusted IDs
+  without probing agent CLIs or gating terminal creation on health/auth.
 - [x] Move refresh ownership into the app lifecycle with probe cancellation and
   safe disposal before SQLite closes.
-- [x] Add typed timeout/process/parse diagnostics and demand-driven retry
-  backoff without background timers.
+- [x] Add typed timeout/process/parse diagnostics without retry timers or
+  backoff that could suppress an explicit refresh.
 - [x] Cover every launch path, including linked presets and fresh-workspace
   automation, with the same async capability preflight.
 - [x] Resolve installed executables from explicit configuration and `PATH`
@@ -43,7 +44,7 @@ local CLI snapshot cache.
 
 The active feature branch contains the expanded runtime capability layer:
 
-- a process-local cache with a 30-second TTL;
+- revision-scoped in-flight deduplication without a temporal process cache;
 - runtime discovery for Codex, OpenCode, Cursor, Pi, Antigravity, Copilot, Grok,
   and Kimi where their installed tools expose usable metadata;
 - provider-specific authentication and availability observations;
@@ -58,14 +59,15 @@ contract before persistence is built on top of it.
 
 ## Product behavior
 
-Opening any workspace-create or agent-selection surface follows
-stale-while-revalidate semantics:
+Opening the authenticated renderer reads persisted snapshots immediately.
+Revalidation is owned by the renderer session and explicit configuration
+actions:
 
 1. Read the most recent valid snapshot for this host without running a CLI.
 2. Render usable cached choices immediately when the snapshot is within the
    display-age policy.
-3. Mark cached health and inventory provenance internally and start one
-   deduplicated background refresh only when the relevant agent data is stale.
+3. The authenticated shell revalidates the active host once per renderer
+   session. `Ctrl+R` creates a new session and therefore a new refresh.
 4. Replace inventory atomically when a live authoritative probe succeeds.
 5. Preserve the last good inventory during transient failures, while exposing
    the latest health/authentication observation separately.
@@ -90,36 +92,24 @@ Initial retention policy:
 
 These durations are named constants and covered by clock-controlled tests.
 
-## Demand-driven refresh policy
+## Refresh policy
 
-Do not probe every configured CLI merely because the host-service or desktop
-starts. Startup reads SQLite and performs bounded retention cleanup only. It does
-not spawn agent processes.
+The host only hydrates and prunes SQLite during startup. It never probes an
+agent CLI until an explicit refresh RPC or relevant config mutation arrives.
+The authenticated renderer keeps one host-scoped refresh query alive for its
+entire session. Multiple picker mounts share it; focus and reconnect do not
+refetch it; `Ctrl+R` creates a new `QueryClient` and intentionally probes again.
+There is no polling or freshness TTL. Config and snapshot queries also avoid
+focus refetches so a renderer session cannot combine a newly observed external
+config with an older capability snapshot; `Ctrl+R` starts a consistent session.
 
-Refresh work is triggered by actual demand:
+Changing `command` or `env`, restoring a default, and adding/resetting configs
+refresh only the affected config(s) before their mutation resolves. Launch reads
+the latest valid snapshot and curated catalog without probing. Simultaneous
+explicit probes for the same agent revision share one in-flight promise.
 
-- opening a surface that needs agent choices refreshes only stale agents visible
-  to that surface;
-- window focus requests refresh only when those agents are stale;
-- launch reuses a sufficiently recent live result and probes only the selected
-  agent when launch freshness has expired;
-- config changes invalidate only the affected agent and may refresh it when a
-  relevant surface is active;
-- explicit retry or future Health Center actions may force one affected agent.
-
-Initial freshness windows:
-
-- 30 seconds for the current in-memory live result; concurrent callers share the
-  same promise for the full probe duration;
-- 5 minutes before a picker demand considers live health stale;
-- 30 seconds before account-dependent launch validation requires a new live
-  result.
-
-The persisted table stores one current row per agent and overwrites it. It is not
-an observation history. Persist immediately when inventory, authentication, or
-availability changes. An unchanged successful health check may update its
-heartbeat at most once per picker freshness window, avoiding unnecessary SQLite
-writes.
+Every real probe observation is persisted. The persisted table stores one
+current row per agent and overwrites it; it is not an observation history.
 
 ## Capability data contract
 
@@ -196,7 +186,6 @@ interface AgentCapabilityView {
 	inventoryOrigin: "live" | "persisted" | "none";
 	health: AgentHealthObservation;
 	healthOrigin: "live" | "persisted" | "none";
-	refreshStatus: "idle" | "refreshing" | "backoff";
 }
 ```
 
@@ -273,33 +262,29 @@ Strict persistence limits:
 - oversized live results are classified as parse failures and do not replace the
   last good inventory.
 
-Keep the short in-memory TTL as the first-level cache. SQLite is the cold-start
-cache, not a replacement for in-flight deduplication.
+SQLite is the cold-start cache; in-flight deduplication is keyed by agent ID and
+config revision. No capability freshness TTL is used.
 
 ## Host-service API and refresh lifecycle
 
 Split cache reads from expensive probes:
 
-- `listCapabilitySnapshots`: returns memory, then persisted snapshots, without
-  running a CLI.
-- `refreshCapabilities`: probes configured agents, records live health,
-  conditionally persists valid inventory, and returns the merged view.
-- `ensureFreshCapability`: coalesces with an in-flight refresh and returns a
-  short-lived validated capability lease for launch.
+- `listCapabilitySnapshots`: returns persisted snapshots without running a CLI.
+- `refreshCapabilities({})`: explicitly probes the configured agents and returns
+  the resulting persisted views; targeted `agentIds` probe only those agents.
+- Launch validation reads the current revision-matched snapshot and never calls
+  a discovery CLI.
 
 Refreshes are deduplicated by agent ID plus config revision. Use bounded
 concurrency across agents. A config update may start a new revision without
 waiting for the obsolete revision, but the obsolete result cannot be persisted.
 
-The renderer requests refresh on first use and on window focus only when data is
-stale. Launch requests freshness only for the selected agent. Refresh work is
-owned by the app lifecycle:
+Refresh work is owned by the renderer session and config mutations:
 
 - it accepts an `AbortSignal`;
 - child probes terminate on abort or timeout, with a forced-kill fallback;
-- retry eligibility uses bounded exponential backoff without scheduling timers;
-- `dispose()` clears retry state, aborts probes, awaits settlement, then closes the
-  database;
+- every explicit refresh is honored; there is no retry/backoff state;
+- `dispose()` aborts probes, awaits settlement, then closes the database;
 - tests use injected clocks, probe runners, and concurrency limits.
 
 Refresh merge rules:
@@ -311,8 +296,7 @@ Refresh merge rules:
 - Confirmed missing executable replaces health, clears memory, and deletes the
   persisted inventory.
 - Timeout, process failure, or parse failure preserves last-good inventory,
-  records separate live health/error metadata, and schedules bounded exponential
-  backoff.
+  and records separate live health/error metadata.
 - A successful authoritative list replaces the old list. Never merge retired
   models into it.
 - Raw stderr/stdout never crosses the API or enters SQLite.
@@ -323,11 +307,10 @@ Refresh merge rules:
 
 1. Query cached snapshots immediately without probing a CLI.
 2. Render cached ordering without waiting for refresh.
-3. Ask a shared query/mutation controller to refresh only stale agents needed by
-   the active surface, not one effect per picker.
-4. Coalesce first-use and window-focus refreshes by host URL, agent ID, and config
-   revision.
-5. Replace query data with the returned merged view atomically.
+3. Start one explicit refresh per selected host and renderer session. `Ctrl+R`
+   intentionally creates a new session; focus and reconnect do not refresh.
+4. Write the returned view into the snapshot query cache atomically.
+5. Never merge a second refresh-data source over snapshots.
 6. Preserve existing data while reads or refreshes are pending.
 7. Reconcile persisted model and trait selections only after a successful
    authoritative refresh explicitly removes them.
@@ -335,9 +318,8 @@ Refresh merge rules:
    authentication. When a live probe confirms a missing executable, clear its
    inventory, retain the timestamped health row, and hide the agent.
 
-The always-mounted, closed workspace modal may hydrate from
-`listCapabilitySnapshots`, but it must not call the refresh mutation until a
-surface that needs the choices is actually open.
+The always-mounted workspace modal owns the active-host session refresh so a
+normal app entry and `Ctrl+R` update capabilities before the picker opens.
 
 All workspace-create, task, automation, resume, and in-workspace new-agent
 surfaces must consume this shared hook and capability map. Do not implement
@@ -345,23 +327,17 @@ separate refresh behavior in individual pickers.
 
 ## Launch-time safety
 
-A cached choice is display data, not launch authority. Introduce an async
-`ensureFreshCapability(config, selection)` boundary before terminal launch:
+Superset creates a terminal session; the CLI owns runtime authentication and
+execution failures. Launch validation therefore performs no capability probe
+and does not block on persisted health. It still:
 
-- reuse an in-flight refresh when one exists;
-- require a live result no older than the short launch TTL for account-dependent
-  providers;
-- verify executable, authentication policy, model ID, and every explicit trait;
-- reject selections removed by the authoritative inventory;
-- return an actionable typed error and invalidate renderer queries;
-- never silently omit an invalid model/trait flag and fall back to the CLI
+- verifies the configured agent and config revision;
+- validates model and trait IDs against revision-matched runtime inventory or
+  trusted curated catalogs;
+- rejects unknown runtime-only values when no snapshot exists;
+- never silently omits an invalid model/trait flag and falls back to the CLI
   default;
-- allow curated Claude models only when its live version/auth policy passes.
-
-The validated result becomes a short-lived capability lease containing agent ID,
-config revision, inventory timestamp, and allowed selection. Pure synchronous
-command construction accepts that lease instead of consulting an arbitrary
-cached snapshot.
+- returns a branded selection consumed by pure command construction.
 
 Cover every launch path:
 
@@ -372,10 +348,9 @@ Cover every launch path:
 - setup-terminal chaining;
 - task and automation dispatch.
 
-Run async capability preflight before workspace filesystem, database, or cloud
-side effects. For setup-terminal chaining, preserve the exact validated model
-argument in the chained command. If auth changes while setup runs, the CLI may
-fail visibly, but Superset must not silently drop the model and launch a default.
+Run selection preflight before workspace filesystem, database, or cloud side
+effects. For setup-terminal chaining, preserve the exact validated model
+argument. Missing executables or expired auth fail visibly inside the terminal.
 
 ## Executable resolution and portability
 
@@ -427,21 +402,21 @@ path and `.cmd` handling even while Windows is not the primary desktop target.
 - [x] Test restart hydration, corruption, identity mismatch, expiry, limits, secret
   exclusion, and update-during-probe races.
 
-### Slice 3: Stale-while-revalidate API and lifecycle
+### Slice 3: Explicit refresh API and lifecycle
 
-- [x] Split cached reads, refresh, and launch freshness operations.
+- [x] Split cached reads, explicit refresh, and launch validation operations.
 - [x] Add per-revision in-flight deduplication, bounded concurrency, and
   last-good merge rules.
-- [x] Add demand-driven stale checks and retention cleanup. Startup does not
-  probe CLIs.
+- [x] Add retention cleanup and one asynchronous refresh per selected host and
+  renderer session.
 - [x] Add app-owned disposal and cancellation for spawned CLI probes.
-- [x] Add demand-driven retry/backoff and typed timeout/process/parse
-  classification.
+- [x] Add typed timeout/process/parse classification without retry/backoff.
 
 ### Slice 4: Cache-first renderer
 
 - [x] Render persisted snapshots immediately in `useV2AgentChoices`.
-- [x] Centralize stale-only first-use and focus refresh by host URL and agent ID.
+- [x] Run one renderer-owned refresh per host URL without focus, reconnect, or
+  TTL refetches; `Ctrl+R` intentionally creates another session.
 - [x] Replace query data atomically without selection or scroll resets.
 - [x] Cover workspace creation, tasks, automations, resume, and in-workspace
   launches through the shared hook.
@@ -454,13 +429,15 @@ path and `.cmd` handling even while Windows is not the primary desktop target.
 - [x] Add macOS, Linux Omarchy, native-over-wrapper, path-with-spaces, and
   Windows `.cmd` tests.
 
-### Slice 6: Async launch validation and diagnostics
+### Slice 6: Snapshot-backed launch validation and diagnostics
 
-- [x] Add `ensureFreshCapability` and the validated capability lease.
-- [x] Convert every preflight boundary that needs live discovery to async.
+- [x] Add a branded validated launch selection backed by the current snapshot
+  and trusted static transport metadata.
+- [x] Keep every launch preflight free of discovery processes.
 - [x] Remove silent model/trait fallback from validated launch paths.
-- [x] Add typed errors for retired models, unsupported traits, expired auth, missing
-  binaries, and config changes during validation.
+- [x] Add typed errors for retired models, unsupported traits, selection
+  mismatch, and config changes during validation. Auth and binary failures belong
+  to the terminal CLI.
 - [x] Expose inventory age/origin, health age/origin, resolver source, and
   sanitized last error kind for the future Health Center.
 
@@ -473,53 +450,25 @@ path and `.cmd` handling even while Windows is not the primary desktop target.
   restore, reset, or deletion.
 - [x] Resolver tests use fake executables and wrappers for supported executable
   formats and platform path semantics.
-- [x] Concurrency tests prove multiple picker mounts and focus events launch at
-  most one stale probe per agent revision.
-- [x] Startup tests prove snapshot hydration and retention cleanup spawn no agent
-  processes.
-- [x] Freshness tests prove a picker inside the 5-minute window and a launch inside
-  the 30-second window reuse the live result without another probe.
-- [x] Lifecycle tests prove shutdown clears retry state and cancels child probes
-  before the database closes.
+- [x] Concurrency tests prove multiple picker mounts share one session refresh,
+  focus does not refresh, and a new `QueryClient` refreshes again.
+- [x] Startup tests prove snapshot hydration itself spawns no process.
+- [x] Launch validation tests prove persisted auth health does not block launch
+  and runtime-only unknown models remain rejected without probing.
+- [x] Lifecycle tests prove shutdown cancels child probes before the database
+  closes.
 - [x] Failure tests cover timeout, auth loss, binary removal,
-  corrupt/expired/oversized
-  cache, changed command/environment, and a model retired between snapshot and
-  launch.
+  corrupt/expired/oversized cache, changed command/environment, and an unknown
+  model at launch.
 - [x] Launch-path tests cover direct run, resume, session creation, synchronous and
   enqueued workspace creation, setup chaining, tasks, and automations.
-- Desktop end-to-end evidence recorded on 2026-08-14:
-  - [x] first cold run with no cache showed honest `Loading agents...` state;
-  - [x] after discovery, the selected Antigravity, Gemini 3.6 Flash, and High
-    choices rendered in the real picker;
-  - [x] a restart with 15 intentionally stale snapshot rows rendered models in
-    605 ms while only 2 rows had completed revalidation;
-  - [x] after background refresh completed, all 15 rows were refreshed while the
-    selected agent, model, effort, and scroll position remained unchanged;
-  - [x] console errors remained empty throughout the sampled cold-start and
-    stale-refresh lifecycle;
-  - [x] simulate an inaccessible cached model launch at the renderer and
-    launch-contract boundaries with isolated fake capability data;
-  - [x] simulate config mutation during an active delayed probe and prove the
-    obsolete result is rejected;
-  - [x] simulate two connected-host lifecycles with isolated service instances,
-    host-scoped renderer keys, caches, invalidation, and refresh coalescing.
-- [x] Focused suites pass: 228 host/shared tests, 35 desktop tests, and 4
-  automation tests.
-- [x] Root typecheck passes all 37 tasks.
-- [x] `bun run lint:fix`, `bun run lint`, and `git diff --check` pass.
-- [x] Desktop verification records the exact worktree, renderer URL, route,
-  signed-in session, screenshots, timings, state measurements, and console errors.
-
-The desktop evidence used this worktree, renderer `http://localhost:3085`, route
-`#/new-workspace`, and dedicated CDP port `9333`. The local seeded account was
-signed in through real pointer input. Screenshots were captured before and after
-restart. The three environmental scenarios were completed on 2026-08-15 as
-controlled simulations using fake executables and temporary SQLite databases.
-Ten focused tests covered missing-executable launch preflight, config-revision
-races, two isolated host-service instances, host-scoped renderer keys and
-invalidation, and per-host refresh coalescing. They are acceptance simulations
-and are not claimed as manual desktop E2E evidence against real remote machines
-or globally installed agent CLIs.
+- [x] Focused suites pass: 142 host-service tests and 21 desktop renderer tests.
+- [x] Host-service typecheck passes.
+- [x] Biome checks for every changed TypeScript/TSX file and `git diff --check`
+  pass.
+- [ ] Desktop-wide typecheck and manual E2E remain to be rerun in a fully bootstrapped
+  workspace. This checkout does not have the `tsr` executable or generated
+  `routeTree.gen.ts`; focused renderer tests cover the changed session lifecycle.
 
 ## Out of scope
 

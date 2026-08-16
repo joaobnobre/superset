@@ -68,7 +68,7 @@ export const createSession = protectedProcedure
 	.input(createSessionInputSchema)
 	.mutation(async ({ ctx, input }) => {
 		for (const launch of input.agents ?? []) {
-			await validateAgentLaunchSelection(ctx.db, launch, ctx.capabilityRefresh);
+			await validateAgentLaunchSelection(ctx.db, launch);
 		}
 
 		// Idempotency: a retry carrying the same optimistic id must return the

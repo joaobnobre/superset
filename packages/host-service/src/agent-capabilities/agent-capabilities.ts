@@ -58,7 +58,6 @@ export interface AgentCapabilitySnapshot {
 	inventoryCheckedAt?: string | null;
 	inventoryOrigin?: "live" | "persisted" | "none";
 	healthOrigin?: "live" | "persisted";
-	refreshStatus?: "idle" | "refreshing" | "backoff";
 }
 
 export interface AgentCapabilityConfig {
@@ -67,7 +66,6 @@ export interface AgentCapabilityConfig {
 	command: string;
 	env: Record<string, string>;
 	configRevision?: number;
-	cacheNamespace?: string;
 }
 
 interface CommandResult {
@@ -93,7 +91,6 @@ export class AgentCapabilityProbeAbortedError extends Error {
 }
 
 const PROBE_TIMEOUT_MS = 4_000;
-const CACHE_TTL_MS = 30_000;
 const MAX_OUTPUT_LENGTH = 1024 * 1024;
 const AUTH_DEPENDENT_PRESETS = new Set([
 	"amp",
@@ -112,16 +109,6 @@ const AUTH_DEPENDENT_PRESETS = new Set([
 	"polygraph",
 	"vibe",
 ]);
-const capabilityCache = new Map<
-	string,
-	{ expiresAt: number; snapshot: AgentCapabilitySnapshot }
->();
-const capabilityInFlight = new Map<string, Promise<AgentCapabilitySnapshot>>();
-
-function cacheKey(config: AgentCapabilityConfig): string {
-	return `${config.cacheNamespace ?? "global"}:${config.id}:${config.configRevision ?? 0}`;
-}
-
 const PROBE_GRACE_PERIOD_MS = 250;
 const PROBE_KILL_SAFETY_MS = 500;
 const nodeErrorSchema = z.object({ code: z.string() }).passthrough();
@@ -1230,7 +1217,6 @@ async function discoverModels(
 async function probeAgentCapability(
 	config: AgentCapabilityConfig,
 	now: number,
-	key: string,
 	signal?: AbortSignal,
 ): Promise<AgentCapabilitySnapshot> {
 	const env = await createProbeEnvironment(config.env);
@@ -1252,9 +1238,7 @@ async function probeAgentCapability(
 			inventoryCheckedAt: null,
 			inventoryOrigin: "none",
 			healthOrigin: "live",
-			refreshStatus: "idle",
 		};
-		capabilityCache.set(key, { expiresAt: now + CACHE_TTL_MS, snapshot });
 		return snapshot;
 	}
 	const executable = resolvedExecutable.path;
@@ -1307,55 +1291,14 @@ async function probeAgentCapability(
 			discovery.source === "none" ? null : new Date(now).toISOString(),
 		inventoryOrigin: discovery.source === "none" ? "none" : "live",
 		healthOrigin: "live",
-		refreshStatus: "idle",
 	};
-	capabilityCache.set(key, { expiresAt: now + CACHE_TTL_MS, snapshot });
 	return snapshot;
 }
 
 export function inspectAgentCapability(
 	config: AgentCapabilityConfig,
-	options: { force?: boolean; now?: number; signal?: AbortSignal } = {},
+	options: { now?: number; signal?: AbortSignal } = {},
 ): Promise<AgentCapabilitySnapshot> {
 	const now = options.now ?? Date.now();
-	const key = cacheKey(config);
-	const cached = capabilityCache.get(key);
-	if (!options.force && cached && cached.expiresAt > now) {
-		return Promise.resolve(cached.snapshot);
-	}
-	const existing = capabilityInFlight.get(key);
-	if (existing) return existing;
-
-	const probe = probeAgentCapability(config, now, key, options.signal).finally(
-		() => {
-			if (capabilityInFlight.get(key) === probe) {
-				capabilityInFlight.delete(key);
-			}
-		},
-	);
-	capabilityInFlight.set(key, probe);
-	return probe;
-}
-
-export function getCachedAgentCapability(
-	config: AgentCapabilityConfig,
-	now = Date.now(),
-): AgentCapabilitySnapshot | null {
-	const cached = capabilityCache.get(cacheKey(config));
-	return cached && cached.expiresAt > now ? cached.snapshot : null;
-}
-
-export function clearAgentCapabilityCache(): void {
-	capabilityCache.clear();
-	capabilityInFlight.clear();
-}
-
-export function clearAgentCapabilityCacheNamespace(namespace: string): void {
-	const prefix = `${namespace}:`;
-	for (const key of capabilityCache.keys()) {
-		if (key.startsWith(prefix)) capabilityCache.delete(key);
-	}
-	for (const key of capabilityInFlight.keys()) {
-		if (key.startsWith(prefix)) capabilityInFlight.delete(key);
-	}
+	return probeAgentCapability(config, now, options.signal);
 }

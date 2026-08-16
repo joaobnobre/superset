@@ -1,10 +1,7 @@
 import type { AppRouter } from "@superset/host-service";
 import type { QueryClient } from "@tanstack/react-query";
 import { TRPCClientError } from "@trpc/client";
-import {
-	hostAgentCapabilityRefreshQueryKey,
-	hostAgentCapabilitySnapshotQueryKey,
-} from "./capabilityQueryKeys";
+import { hostAgentCapabilitySnapshotQueryKey } from "./capabilityQueryKeys";
 
 type HostServiceClientError = TRPCClientError<AppRouter>;
 type HostServiceErrorData = NonNullable<HostServiceClientError["data"]>;
@@ -34,9 +31,6 @@ export function invalidateCapabilitiesOnLaunchError(
 	if (!hostUrl || !getAgentLaunchCapabilityError(error)) return false;
 	void queryClient.invalidateQueries({
 		queryKey: hostAgentCapabilitySnapshotQueryKey(hostUrl),
-	});
-	void queryClient.invalidateQueries({
-		queryKey: hostAgentCapabilityRefreshQueryKey(hostUrl),
 	});
 	return true;
 }

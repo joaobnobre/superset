@@ -88,7 +88,6 @@ export function V2AgentsSettings({
 
 	const configsQuery = useV2AgentConfigs(activeHostUrl);
 	const queryKey = [...QUERY_KEY, activeHostUrl] as const;
-	const queryFamily = { queryKey: QUERY_KEY };
 
 	const invalidate = (scope: HostAgentQueryInvalidation) => {
 		if (!activeHostUrl) return;
@@ -96,7 +95,7 @@ export function V2AgentsSettings({
 	};
 
 	const updateCachedConfig = (updated: HostAgentConfig) => {
-		queryClient.setQueriesData<HostAgentConfig[]>(queryFamily, (current) =>
+		queryClient.setQueryData<HostAgentConfig[]>(queryKey, (current) =>
 			current?.map((config) =>
 				config.id === updated.id ? { ...config, ...updated } : config,
 			),

@@ -193,13 +193,12 @@ export const agentConfigsRouter = router({
 		return ctx.capabilityRefresh.readPersisted();
 	}),
 
-	/** Refresh only requested stale agents. Concurrent calls share each probe. */
+	/** Explicitly refresh all or the requested agents. Concurrent probes coalesce. */
 	refreshCapabilities: protectedProcedure
 		.input(
 			z
 				.object({
 					agentIds: z.array(z.string().min(1)).optional(),
-					force: z.boolean().optional(),
 				})
 				.optional(),
 		)
@@ -208,9 +207,7 @@ export const agentConfigsRouter = router({
 			const configs = seedDefaultsIfEmpty(ctx.db)
 				.filter((row) => requestedIds === null || requestedIds.has(row.id))
 				.map(toCapabilityConfig);
-			return ctx.capabilityRefresh.refreshCapabilities(configs, {
-				force: input?.force,
-			});
+			return ctx.capabilityRefresh.refreshCapabilities(configs);
 		}),
 
 	/**
@@ -221,42 +218,47 @@ export const agentConfigsRouter = router({
 	 * (used by user-authored agents, whose `presetId` is `"custom"`). Duplicate
 	 * `presetId` values are allowed — each row gets a fresh `id`.
 	 */
-	add: protectedProcedure.input(addInputSchema).mutation(({ ctx, input }) => {
-		const existing = listOrdered(ctx.db);
-		const nextOrder =
-			existing.length === 0
-				? 0
-				: Math.max(...existing.map((row) => row.displayOrder)) + 1;
-		const id = randomUUID();
-		ctx.db
-			.insert(hostAgentConfigs)
-			.values({
-				id,
-				presetId: input.presetId ?? "custom",
-				iconId: input.iconId ?? null,
-				label: input.label,
-				command: input.command,
-				argsJson: JSON.stringify(input.args),
-				promptTransport: input.promptTransport,
-				promptArgsJson: JSON.stringify(input.promptArgs),
-				resumeArgsJson: JSON.stringify(input.resumeArgs),
-				envJson: JSON.stringify(input.env),
-				displayOrder: nextOrder,
-			})
-			.run();
-		const created = ctx.db
-			.select()
-			.from(hostAgentConfigs)
-			.where(eq(hostAgentConfigs.id, id))
-			.get();
-		if (!created) {
-			throw new TRPCError({
-				code: "INTERNAL_SERVER_ERROR",
-				message: "Failed to read back inserted host agent config",
-			});
-		}
-		return toOutput(created);
-	}),
+	add: protectedProcedure
+		.input(addInputSchema)
+		.mutation(async ({ ctx, input }) => {
+			const existing = listOrdered(ctx.db);
+			const nextOrder =
+				existing.length === 0
+					? 0
+					: Math.max(...existing.map((row) => row.displayOrder)) + 1;
+			const id = randomUUID();
+			ctx.db
+				.insert(hostAgentConfigs)
+				.values({
+					id,
+					presetId: input.presetId ?? "custom",
+					iconId: input.iconId ?? null,
+					label: input.label,
+					command: input.command,
+					argsJson: JSON.stringify(input.args),
+					promptTransport: input.promptTransport,
+					promptArgsJson: JSON.stringify(input.promptArgs),
+					resumeArgsJson: JSON.stringify(input.resumeArgs),
+					envJson: JSON.stringify(input.env),
+					displayOrder: nextOrder,
+				})
+				.run();
+			const created = ctx.db
+				.select()
+				.from(hostAgentConfigs)
+				.where(eq(hostAgentConfigs.id, id))
+				.get();
+			if (!created) {
+				throw new TRPCError({
+					code: "INTERNAL_SERVER_ERROR",
+					message: "Failed to read back inserted host agent config",
+				});
+			}
+			await ctx.capabilityRefresh
+				.refreshCapability(toCapabilityConfig(created))
+				.catch(() => console.warn("[agent-capabilities] add refresh failed"));
+			return toOutput(created);
+		}),
 
 	/**
 	 * Update editable fields on an existing config. `presetId` and `order`
@@ -269,7 +271,7 @@ export const agentConfigsRouter = router({
 				patch: updatePatchSchema,
 			}),
 		)
-		.mutation(({ ctx, input }) => {
+		.mutation(async ({ ctx, input }) => {
 			const existing = ctx.db
 				.select()
 				.from(hostAgentConfigs)
@@ -332,6 +334,13 @@ export const agentConfigsRouter = router({
 					message: "Failed to read back updated host agent config",
 				});
 			}
+			if (discoveryIdentityChanged) {
+				await ctx.capabilityRefresh
+					.refreshCapability(toCapabilityConfig(updated))
+					.catch(() =>
+						console.warn("[agent-capabilities] config refresh failed"),
+					);
+			}
 			return toOutput(updated);
 		}),
 
@@ -342,7 +351,7 @@ export const agentConfigsRouter = router({
 	 */
 	restoreDefault: protectedProcedure
 		.input(z.object({ id: z.string().min(1) }))
-		.mutation(({ ctx, input }) => {
+		.mutation(async ({ ctx, input }) => {
 			const existing = ctx.db
 				.select()
 				.from(hostAgentConfigs)
@@ -395,6 +404,11 @@ export const agentConfigsRouter = router({
 					message: "Failed to read back restored host agent config",
 				});
 			}
+			await ctx.capabilityRefresh
+				.refreshCapability(toCapabilityConfig(restored))
+				.catch(() =>
+					console.warn("[agent-capabilities] restore refresh failed"),
+				);
 			return toOutput(restored);
 		}),
 
@@ -464,7 +478,7 @@ export const agentConfigsRouter = router({
 	 * transaction so a crash between delete and insert can't leave the
 	 * table empty.
 	 */
-	resetToDefaults: protectedProcedure.mutation(({ ctx }) => {
+	resetToDefaults: protectedProcedure.mutation(async ({ ctx }) => {
 		ctx.db.transaction((tx) => {
 			const existing = tx
 				.select({ id: hostAgentConfigs.id })
@@ -487,6 +501,10 @@ export const agentConfigsRouter = router({
 				tx.insert(hostAgentConfigs).values(seeds).run();
 			}
 		});
-		return listOrdered(ctx.db).map(toOutput);
+		const rows = listOrdered(ctx.db);
+		await ctx.capabilityRefresh
+			.refreshCapabilities(rows.map(toCapabilityConfig))
+			.catch(() => console.warn("[agent-capabilities] reset refresh failed"));
+		return rows.map(toOutput);
 	}),
 });

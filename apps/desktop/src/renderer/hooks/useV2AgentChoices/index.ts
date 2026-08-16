@@ -20,11 +20,9 @@ export {
 	isDiscoveryChangingAgentPatch,
 } from "./invalidateHostAgentQueries";
 export {
-	mergeCapabilityViews,
-	resolveAgentChoicesFetched,
-} from "./mergeCapabilityViews";
-export {
 	type AgentChoiceCapability,
 	groupAgentsByAvailability,
+	publishCapabilityRefresh,
+	resolveAgentChoicesFetched,
 	useV2AgentChoices,
 } from "./useV2AgentChoices";

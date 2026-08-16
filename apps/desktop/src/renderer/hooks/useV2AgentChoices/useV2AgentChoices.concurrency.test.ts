@@ -22,11 +22,8 @@ function capability(): AgentChoiceCapability {
 			message: null,
 		},
 		healthOrigin: "persisted",
-		refreshStatus: "idle",
 	};
 }
-
-const CAPABILITY_PICKER_FRESHNESS_MS = 5 * 60 * 1_000;
 
 async function waitFor(
 	predicate: () => boolean,
@@ -41,12 +38,12 @@ async function waitFor(
 	}
 }
 
-describe("useV2AgentChoices shared refresh", () => {
+describe("useV2AgentChoices renderer-session capability refresh", () => {
 	afterEach(() => {
 		focusManager.setFocused(true);
 	});
 
-	test("two mounts plus focus share one stale refresh per host", async () => {
+	test("two mounts and focus share one session refresh per host", async () => {
 		const hostUrl = "http://workspace-host";
 		const refreshCalls: string[] = [];
 		const queryClient = new QueryClient({
@@ -66,8 +63,11 @@ describe("useV2AgentChoices shared refresh", () => {
 					},
 				];
 			},
-			staleTime: CAPABILITY_PICKER_FRESHNESS_MS,
-			refetchOnWindowFocus: true,
+			staleTime: Number.POSITIVE_INFINITY,
+			gcTime: Number.POSITIVE_INFINITY,
+			refetchOnMount: false,
+			refetchOnWindowFocus: false,
+			refetchOnReconnect: false,
 		};
 
 		const firstMount = new QueryObserver(queryClient, options);
@@ -106,8 +106,8 @@ describe("useV2AgentChoices shared refresh", () => {
 			focusManager.setFocused(false);
 			focusManager.setFocused(true);
 
-			await waitFor(() => refreshCalls.length === 2);
-			expect(refreshCalls).toHaveLength(2);
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(refreshCalls).toHaveLength(1);
 		} finally {
 			unsubscribeFirst();
 			unsubscribeSecond();
@@ -115,5 +115,36 @@ describe("useV2AgentChoices shared refresh", () => {
 			queryClient.unmount();
 			focusManager.setFocused(true);
 		}
+	});
+
+	test("a new renderer QueryClient performs a new host refresh", async () => {
+		const hostUrl = "http://workspace-host";
+		let refreshCalls = 0;
+		const runRendererSession = async () => {
+			const queryClient = new QueryClient({
+				defaultOptions: { queries: { retry: false } },
+			});
+			const observer = new QueryObserver(queryClient, {
+				queryKey: hostAgentCapabilityRefreshQueryKey(hostUrl),
+				queryFn: async () => {
+					refreshCalls += 1;
+					return 1;
+				},
+				staleTime: Number.POSITIVE_INFINITY,
+				gcTime: Number.POSITIVE_INFINITY,
+				refetchOnMount: false,
+				refetchOnWindowFocus: false,
+				refetchOnReconnect: false,
+			});
+			const unsubscribe = observer.subscribe(() => {});
+			await waitFor(() => observer.getCurrentResult().status === "success");
+			unsubscribe();
+			queryClient.clear();
+		};
+
+		await runRendererSession();
+		await runRendererSession();
+
+		expect(refreshCalls).toBe(2);
 	});
 });

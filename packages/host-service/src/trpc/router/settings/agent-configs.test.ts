@@ -52,6 +52,9 @@ function insertHealthSnapshot(
 	db: ReturnType<typeof createTestDb>,
 	config: { id: string; presetId: string; capabilityRevision?: number },
 ) {
+	db.delete(schema.hostAgentCapabilitySnapshots)
+		.where(eq(schema.hostAgentCapabilitySnapshots.agentId, config.id))
+		.run();
 	db.insert(schema.hostAgentCapabilitySnapshots)
 		.values({
 			agentId: config.id,
@@ -195,7 +198,6 @@ describe("agentConfigsRouter", () => {
 					message: null,
 				},
 				healthOrigin: "persisted",
-				refreshStatus: "idle",
 			});
 			expect(Object.keys(snapshot ?? {}).sort()).toEqual([
 				"agentId",
@@ -204,7 +206,6 @@ describe("agentConfigsRouter", () => {
 				"inventory",
 				"inventoryOrigin",
 				"presetId",
-				"refreshStatus",
 			]);
 		});
 
@@ -218,6 +219,9 @@ describe("agentConfigsRouter", () => {
 				promptArgs: [],
 				env: {},
 			});
+			db.delete(schema.hostAgentCapabilitySnapshots)
+				.where(eq(schema.hostAgentCapabilitySnapshots.agentId, config.id))
+				.run();
 			db.insert(schema.hostAgentCapabilitySnapshots)
 				.values({
 					agentId: config.id,
@@ -249,7 +253,7 @@ describe("agentConfigsRouter", () => {
 			});
 		});
 
-		it("reuses fresh persisted health during stale-only refresh", async () => {
+		it("targeted refresh probes even with a recent persisted snapshot", async () => {
 			const { db, caller } = createCallerWithDb();
 			const config = await caller.add({
 				label: "Fresh cached agent",
@@ -271,12 +275,11 @@ describe("agentConfigsRouter", () => {
 				inventory: null,
 				inventoryOrigin: "none",
 				health: {
-					status: "ready",
-					installed: true,
-					auth: "authenticated",
+					status: "unavailable",
+					installed: false,
+					auth: "unknown",
 				},
-				healthOrigin: "persisted",
-				refreshStatus: "idle",
+				healthOrigin: "live",
 			});
 		});
 	});
@@ -543,8 +546,8 @@ describe("agentConfigsRouter", () => {
 					.select()
 					.from(schema.hostAgentCapabilitySnapshots)
 					.where(eq(schema.hostAgentCapabilitySnapshots.agentId, first.id))
-					.get(),
-			).toBeUndefined();
+					.get()?.configRevision,
+			).toBe(afterCommand?.capabilityRevision);
 
 			if (!afterCommand) return;
 			insertHealthSnapshot(db, afterCommand);
@@ -565,8 +568,8 @@ describe("agentConfigsRouter", () => {
 					.select()
 					.from(schema.hostAgentCapabilitySnapshots)
 					.where(eq(schema.hostAgentCapabilitySnapshots.agentId, first.id))
-					.get(),
-			).toBeUndefined();
+					.get()?.configRevision,
+			).toBe(afterEnv?.capabilityRevision);
 		});
 
 		it("preserves capability revision and snapshots for launch-only or display changes", async () => {
@@ -760,8 +763,8 @@ describe("agentConfigsRouter", () => {
 					.select()
 					.from(schema.hostAgentCapabilitySnapshots)
 					.where(eq(schema.hostAgentCapabilitySnapshots.agentId, codex.id))
-					.get(),
-			).toBeUndefined();
+					.get()?.configRevision,
+			).toBe(restoredRow?.capabilityRevision);
 		});
 
 		it("rejects custom agents and unknown ids", async () => {
@@ -863,6 +866,6 @@ describe("agentConfigsRouter", () => {
 					.where(eq(schema.hostAgentCapabilitySnapshots.agentId, seedFirst.id))
 					.get(),
 			).toBeUndefined();
-		});
+		}, 15_000);
 	});
 });

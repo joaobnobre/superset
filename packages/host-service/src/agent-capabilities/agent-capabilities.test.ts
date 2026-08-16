@@ -1,11 +1,10 @@
-import { beforeEach, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import {
 	AgentCapabilityProbeAbortedError,
-	clearAgentCapabilityCache,
 	inspectAgentCapability,
 	mapCopilotModels,
 	parseAntigravityModels,
@@ -20,8 +19,6 @@ import {
 } from "./agent-capabilities";
 
 const nodeErrorSchema = z.object({ code: z.string() });
-
-beforeEach(() => clearAgentCapabilityCache());
 
 describe("agent capabilities", () => {
 	test("groups Antigravity effort variants without inventing unsupported levels", () => {
@@ -438,7 +435,7 @@ describe("agent capabilities", () => {
 						command: processFailure,
 						env: {},
 					},
-					{ force: true },
+					{},
 				),
 				inspectAgentCapability(
 					{
@@ -447,7 +444,7 @@ describe("agent capabilities", () => {
 						command: parseFailure,
 						env: {},
 					},
-					{ force: true },
+					{},
 				),
 			]);
 			expect(processSnapshot).toMatchObject({
@@ -473,7 +470,7 @@ describe("agent capabilities", () => {
 					command: executable,
 					env: {},
 				},
-				{ force: true },
+				{},
 			);
 			expect(snapshot).toMatchObject({
 				status: "unavailable",
@@ -503,7 +500,7 @@ describe("agent capabilities", () => {
 					command: executable,
 					env: {},
 				},
-				{ force: true },
+				{},
 			);
 			expect(snapshot).toMatchObject({
 				status: "ready",
@@ -513,36 +510,6 @@ describe("agent capabilities", () => {
 		} finally {
 			if (previous === undefined) delete process.env.ELECTRON_RUN_AS_NODE;
 			else process.env.ELECTRON_RUN_AS_NODE = previous;
-			await rm(directory, { recursive: true, force: true });
-		}
-	});
-
-	test("coalesces concurrent probes for the same config revision", async () => {
-		const directory = await mkdtemp(join(tmpdir(), "superset-agent-dedupe-"));
-		const executable = join(directory, "opencode-test");
-		const logPath = join(directory, "invocations.log");
-		await writeFile(
-			executable,
-			'#!/bin/sh\nprintf "x\\n" >> "$LOG_PATH"\n[ "$1" = "models" ] && printf "provider/model-1\\n"\n[ "$1" = "--version" ] && printf "1.0.0\\n"\n',
-		);
-		await chmod(executable, 0o755);
-		try {
-			const config = {
-				id: "opencode-dedupe-test",
-				presetId: "opencode",
-				command: executable,
-				env: { LOG_PATH: logPath },
-				configRevision: 7,
-			};
-			const [first, second] = await Promise.all([
-				inspectAgentCapability(config, { force: true }),
-				inspectAgentCapability(config, { force: true }),
-			]);
-			expect(second).toEqual(first);
-			expect((await readFile(logPath, "utf8")).trim().split("\n")).toHaveLength(
-				3,
-			);
-		} finally {
 			await rm(directory, { recursive: true, force: true });
 		}
 	});
@@ -566,7 +533,7 @@ describe("agent capabilities", () => {
 					env: { LOG_PATH: logPath },
 					configRevision: 1,
 				},
-				{ force: true, signal: controller.signal },
+				{ signal: controller.signal },
 			);
 			for (let attempt = 0; attempt < 100; attempt += 1) {
 				try {
@@ -620,7 +587,7 @@ describe("agent capabilities", () => {
 					command: executable,
 					env: {},
 				},
-				{ force: true },
+				{},
 			);
 			expect(Date.now() - startedAt).toBeLessThan(1_000);
 			expect(snapshot).toMatchObject({

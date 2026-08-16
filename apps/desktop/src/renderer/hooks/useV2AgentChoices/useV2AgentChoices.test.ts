@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 import type { AppRouter } from "@superset/host-service";
 import { QueryClient } from "@tanstack/react-query";
 import { TRPCClientError } from "@trpc/client";
-import { V2_AGENT_CONFIGS_QUERY_KEY } from "renderer/hooks/useV2AgentConfigs";
+import {
+	V2_AGENT_CONFIGS_QUERY_KEY,
+	V2_AGENT_CONFIGS_SESSION_QUERY_POLICY,
+} from "renderer/hooks/useV2AgentConfigs";
 import {
 	getCapabilityDisplayInventory,
 	isAgentChoiceEnabled,
@@ -24,12 +27,10 @@ import {
 	isDiscoveryChangingAgentPatch,
 } from "./invalidateHostAgentQueries";
 import {
-	mergeCapabilityViews,
-	resolveAgentChoicesFetched,
-} from "./mergeCapabilityViews";
-import {
 	type AgentChoiceCapability,
 	groupAgentsByAvailability,
+	publishCapabilityRefresh,
+	resolveAgentChoicesFetched,
 } from "./useV2AgentChoices";
 
 function capability(
@@ -51,7 +52,6 @@ function capability(
 			...healthOverrides,
 		},
 		healthOrigin: "none",
-		refreshStatus: "idle",
 		...rest,
 	};
 }
@@ -168,7 +168,7 @@ describe("capability query keys", () => {
 		expect(
 			queryClient.getQueryState(hostAgentCapabilityRefreshQueryKey(hostA))
 				?.isInvalidated,
-		).toBe(true);
+		).toBe(false);
 		expect(
 			queryClient.getQueryState(hostAgentCapabilitySnapshotQueryKey(hostB))
 				?.isInvalidated,
@@ -185,69 +185,13 @@ describe("capability query keys", () => {
 	});
 });
 
-describe("mergeCapabilityViews", () => {
-	test("renders persisted snapshots when refresh data is absent", () => {
-		const cached = [
-			capability({
-				agentId: "codex",
-				inventoryOrigin: "persisted",
-				healthOrigin: "persisted",
-			}),
-		];
-		expect(mergeCapabilityViews(cached, undefined)).toEqual(cached);
-	});
-
-	test("successful refresh overwrites matching agents atomically", () => {
-		const cached = [
-			capability({
-				agentId: "codex",
-				inventoryOrigin: "persisted",
-				refreshStatus: "idle",
-			}),
-		];
-		const refresh = [
-			capability({
-				agentId: "codex",
-				inventoryOrigin: "live",
-				healthOrigin: "live",
-				refreshStatus: "idle",
-				health: {
-					status: "ready",
-					installed: true,
-					auth: "authenticated",
-					checkedAt: "2026-01-02T00:00:00.000Z",
-					errorKind: null,
-					message: null,
-				},
-			}),
-		];
-		expect(mergeCapabilityViews(cached, refresh)).toEqual(refresh);
-	});
-
-	test("pending or failed refresh never erases cached rows", () => {
-		const cached = [
-			capability({ agentId: "codex", inventoryOrigin: "persisted" }),
-		];
-		expect(mergeCapabilityViews(cached, undefined)).toEqual(cached);
-		expect(mergeCapabilityViews(cached, [])).toEqual(cached);
-	});
-
-	test("partial refresh keeps untouched agents", () => {
-		const cached = [
-			capability({ agentId: "codex", inventoryOrigin: "persisted" }),
-			capability({ agentId: "claude", inventoryOrigin: "persisted" }),
-		];
-		const refresh = [
-			capability({
-				agentId: "codex",
-				inventoryOrigin: "live",
-				healthOrigin: "live",
-			}),
-		];
-		const merged = mergeCapabilityViews(cached, refresh);
-		expect(merged.map((view) => view.agentId)).toEqual(["codex", "claude"]);
-		expect(merged[0]?.inventoryOrigin).toBe("live");
-		expect(merged[1]?.inventoryOrigin).toBe("persisted");
+describe("agent config session policy", () => {
+	test("keeps external config changes aligned with the next renderer session", () => {
+		expect(V2_AGENT_CONFIGS_SESSION_QUERY_POLICY).toEqual({
+			staleTime: Number.POSITIVE_INFINITY,
+			refetchOnWindowFocus: false,
+			refetchOnReconnect: false,
+		});
 	});
 });
 
@@ -298,6 +242,35 @@ describe("resolveAgentChoicesFetched", () => {
 	});
 });
 
+describe("publishCapabilityRefresh", () => {
+	test("prevents an older snapshot response from replacing refreshed data", async () => {
+		const queryClient = new QueryClient();
+		const hostUrl = "http://host-a";
+		const queryKey = hostAgentCapabilitySnapshotQueryKey(hostUrl);
+		let releaseSnapshot: (() => void) | undefined;
+		const oldRead = queryClient
+			.fetchQuery({
+				queryKey,
+				queryFn: async () => {
+					await new Promise<void>((resolve) => {
+						releaseSnapshot = resolve;
+					});
+					return [capability({ agentId: "old" })];
+				},
+			})
+			.catch(() => undefined);
+
+		const refreshed = [capability({ agentId: "new" })];
+		await publishCapabilityRefresh(queryClient, hostUrl, refreshed);
+		releaseSnapshot?.();
+		await oldRead;
+
+		expect(queryClient.getQueryData<AgentChoiceCapability[]>(queryKey)).toEqual(
+			refreshed,
+		);
+	});
+});
+
 describe("nested AgentChoiceCapability DTO", () => {
 	test("exposes inventory models, modelSource, and health without flattening", () => {
 		const view = capability({
@@ -333,7 +306,6 @@ describe("nested AgentChoiceCapability DTO", () => {
 		expect(view.health.errorKind).toBeNull();
 		expect(view.inventoryOrigin).toBe("persisted");
 		expect(view.healthOrigin).toBe("persisted");
-		expect(view.refreshStatus).toBe("idle");
 	});
 
 	test("preserves installed:null instead of coercing it to false", () => {
@@ -499,7 +471,7 @@ describe("typed launch-error invalidation", () => {
 		).toBeNull();
 	});
 
-	test("invalidates only the selected host snapshot and refresh queries", () => {
+	test("invalidates only the selected host snapshot", () => {
 		const queryClient = new QueryClient();
 		const hostA = "http://host-a";
 		const hostB = "http://host-b";
@@ -530,7 +502,7 @@ describe("typed launch-error invalidation", () => {
 		expect(
 			queryClient.getQueryState(hostAgentCapabilityRefreshQueryKey(hostA))
 				?.isInvalidated,
-		).toBe(true);
+		).toBe(false);
 		expect(
 			queryClient.getQueryState(hostAgentCapabilitySnapshotQueryKey(hostB))
 				?.isInvalidated,

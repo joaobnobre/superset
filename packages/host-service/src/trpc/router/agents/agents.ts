@@ -22,11 +22,7 @@ import { TRPCError } from "@trpc/server";
 import { asc, eq } from "drizzle-orm";
 import { z } from "zod";
 import type { AgentCapabilitySnapshot } from "../../../agent-capabilities/agent-capabilities";
-import {
-	CAPABILITY_LAUNCH_FRESHNESS_MS,
-	type CapabilityRefreshService,
-	ObsoleteCapabilityRefreshError,
-} from "../../../agent-capabilities/capability-refresh-service";
+import { readPersistedCapabilitySnapshots } from "../../../agent-capabilities/capability-refresh-service";
 import type { HostDb } from "../../../db";
 import { hostAgentConfigs, workspaces } from "../../../db/schema";
 import { createTerminalSessionInternal } from "../../../terminal/terminal";
@@ -190,16 +186,13 @@ export interface AgentLaunchSelection {
 	contextWindow?: string;
 }
 
-const validatedCapabilityLeaseBrand = Symbol("ValidatedCapabilityLease");
+const validatedLaunchSelectionBrand = Symbol("ValidatedLaunchSelection");
 
-export interface ValidatedCapabilityLease {
-	readonly [validatedCapabilityLeaseBrand]: true;
+export interface ValidatedLaunchSelection {
+	readonly [validatedLaunchSelectionBrand]: true;
 	readonly agentId: string;
 	readonly presetId: string;
 	readonly configRevision: number;
-	readonly inventoryCheckedAt: string;
-	readonly issuedAt: number;
-	readonly expiresAt: number;
 	readonly selection: AgentLaunchSelection;
 	readonly allowedModelIds: readonly string[];
 	readonly modelSource: AgentCapabilitySnapshot["modelSource"];
@@ -209,11 +202,6 @@ export interface ValidatedCapabilityLease {
 export type AgentLaunchInput = Pick<
 	AgentRunInput,
 	"agent" | "model" | "effort" | "mode" | "speed" | "contextWindow"
->;
-
-export type CapabilityRefresher = Pick<
-	CapabilityRefreshService,
-	"ensureFreshCapability"
 >;
 
 export class AgentLaunchCapabilityError extends Error {
@@ -418,57 +406,14 @@ function validateExplicitLaunchSelection(
 	);
 }
 
-function parseLiveCheckedAt(
-	capability: AgentCapabilitySnapshot,
-	label: string,
-): { iso: string; ms: number } {
-	const iso = capability.inventoryCheckedAt ?? capability.checkedAt;
-	if (!iso) {
-		throw capabilitySelectionError(
-			"PRECONDITION_FAILED",
-			"unavailable",
-			`${label} did not report a live capability timestamp. Retry the launch.`,
-		);
-	}
-	const ms = Date.parse(iso);
-	if (!Number.isFinite(ms)) {
-		throw capabilitySelectionError(
-			"PRECONDITION_FAILED",
-			"unavailable",
-			`${label} reported an invalid capability timestamp. Retry the launch.`,
-		);
-	}
-	return { iso, ms };
-}
-
-function issueValidatedCapabilityLease(
+function issueValidatedLaunchSelection(
 	config: Pick<
 		ResolvedHostAgentConfig,
 		"id" | "presetId" | "capabilityRevision" | "label"
 	>,
 	selection: AgentLaunchSelection,
-	capability: AgentCapabilitySnapshot,
-	now = Date.now(),
-): ValidatedCapabilityLease {
-	if (
-		capability.agentId !== config.id ||
-		capability.presetId !== config.presetId
-	) {
-		throw capabilitySelectionError(
-			"PRECONDITION_FAILED",
-			"config_changed",
-			`${config.label} changed while its capabilities were being validated. Retry the launch.`,
-		);
-	}
-	const liveCheckedAt = parseLiveCheckedAt(capability, config.label);
-	const expiresAt = liveCheckedAt.ms + CAPABILITY_LAUNCH_FRESHNESS_MS;
-	if (now >= expiresAt) {
-		throw capabilitySelectionError(
-			"PRECONDITION_FAILED",
-			"expired_lease",
-			`${config.label} capability lease expired. Retry the launch.`,
-		);
-	}
+	capability: Pick<AgentCapabilitySnapshot, "modelSource" | "models">,
+): ValidatedLaunchSelection {
 	const runtimeModel = capability.models.find(
 		(model) => model.id === selection.model,
 	);
@@ -482,13 +427,10 @@ function issueValidatedCapabilityLease(
 		reasoning,
 	);
 	return {
-		[validatedCapabilityLeaseBrand]: true,
+		[validatedLaunchSelectionBrand]: true,
 		agentId: config.id,
 		presetId: config.presetId,
 		configRevision: config.capabilityRevision,
-		inventoryCheckedAt: liveCheckedAt.iso,
-		issuedAt: now,
-		expiresAt,
 		selection: launchSelectionOf(selection),
 		allowedModelIds: resolveAllowedLaunchModelIds(config.presetId, capability),
 		modelSource: capability.modelSource,
@@ -496,19 +438,18 @@ function issueValidatedCapabilityLease(
 	};
 }
 
-function assertCapabilityLeaseMatches(
+function assertValidatedLaunchSelectionMatches(
 	config: Pick<
 		ResolvedHostAgentConfig,
 		"id" | "presetId" | "capabilityRevision" | "label"
 	>,
 	input: AgentLaunchSelection,
-	lease: ValidatedCapabilityLease,
-	now = Date.now(),
+	validated: ValidatedLaunchSelection,
 ): void {
 	if (
-		lease.agentId !== config.id ||
-		lease.presetId !== config.presetId ||
-		lease.configRevision !== config.capabilityRevision
+		validated.agentId !== config.id ||
+		validated.presetId !== config.presetId ||
+		validated.configRevision !== config.capabilityRevision
 	) {
 		throw capabilitySelectionError(
 			"PRECONDITION_FAILED",
@@ -516,18 +457,11 @@ function assertCapabilityLeaseMatches(
 			`${config.label} changed while its capabilities were being validated. Retry the launch.`,
 		);
 	}
-	if (now >= lease.expiresAt) {
-		throw capabilitySelectionError(
-			"PRECONDITION_FAILED",
-			"expired_lease",
-			`${config.label} capability lease expired. Retry the launch.`,
-		);
-	}
-	if (!sameLaunchSelection(lease.selection, input)) {
+	if (!sameLaunchSelection(validated.selection, input)) {
 		throw capabilitySelectionError(
 			"BAD_REQUEST",
 			"selection_mismatch",
-			`${config.label} capability lease does not match the requested launch selection.`,
+			`${config.label} validated selection does not match the requested launch selection.`,
 		);
 	}
 }
@@ -565,9 +499,7 @@ export function validateAgentResumeSelection(
 export async function validateAgentLaunchSelection(
 	db: HostDb,
 	input: AgentLaunchInput,
-	capabilityRefresh: CapabilityRefresher,
-	options: { now?: number } = {},
-): Promise<ValidatedCapabilityLease | null> {
+): Promise<ValidatedLaunchSelection> {
 	const selection = launchSelectionOf(input);
 	const config = resolveHostAgentConfig(db, input.agent);
 	if (!config) {
@@ -576,48 +508,25 @@ export async function validateAgentLaunchSelection(
 			message: `No host agent config matching '${input.agent}' (tried instance id then preset id).`,
 		});
 	}
-	let capability: AgentCapabilitySnapshot;
-	try {
-		capability = await capabilityRefresh.ensureFreshCapability(
-			{
-				id: config.id,
-				presetId: config.presetId,
-				command: config.command,
-				env: config.env,
-				configRevision: config.capabilityRevision,
-			},
-			{ now: options.now },
-		);
-	} catch (error) {
-		if (error instanceof ObsoleteCapabilityRefreshError) {
-			throw capabilitySelectionError(
-				"PRECONDITION_FAILED",
-				"config_changed",
-				`${config.label} changed while its capabilities were being validated. Retry the launch.`,
-			);
-		}
-		throw error;
-	}
-	if (capability.status !== "ready") {
-		if (capability.status === "authentication_required") {
-			throw capabilitySelectionError(
-				"PRECONDITION_FAILED",
-				"authentication_required",
-				`${config.label} requires authentication before launch.`,
-			);
-		}
-		throw capabilitySelectionError(
-			"PRECONDITION_FAILED",
-			capability.installed ? "unavailable" : "missing_executable",
-			`${config.label} is unavailable on this host.`,
-		);
-	}
-	return issueValidatedCapabilityLease(
-		config,
-		selection,
-		capability,
-		options.now,
+	const view = readPersistedCapabilitySnapshots(db).find(
+		(capability) => capability.agentId === config.id,
 	);
+	const inventory =
+		view?.inventory?.agentId === config.id &&
+		view.inventory.presetId === config.presetId &&
+		view.inventory.configRevision === config.capabilityRevision
+			? view.inventory
+			: null;
+	const capability: Pick<AgentCapabilitySnapshot, "modelSource" | "models"> = {
+		modelSource:
+			inventory?.modelSource === "runtime"
+				? "runtime"
+				: inventory
+					? "fallback"
+					: "none",
+		models: inventory?.models ?? [],
+	};
+	return issueValidatedLaunchSelection(config, selection, capability);
 }
 
 /**
@@ -629,61 +538,40 @@ export async function validateAgentLaunchSelection(
 export async function buildValidatedTerminalAgentLaunch(
 	db: HostDb,
 	input: AgentRunInput,
-	capabilityRefresh: CapabilityRefresher,
-	options: { now?: number } = {},
 ): Promise<{ fullCommand: string; label: string }> {
-	const lease = await validateAgentLaunchSelection(
-		db,
-		input,
-		capabilityRefresh,
-		options,
-	);
-	if (!lease) {
-		throw new TRPCError({
-			code: "INTERNAL_SERVER_ERROR",
-			message: `Missing capability lease for ${input.agent}.`,
-		});
-	}
-	return buildTerminalAgentLaunch(db, input, lease, options);
+	const validated = await validateAgentLaunchSelection(db, input);
+	return buildTerminalAgentLaunch(db, input, validated);
 }
 
 const LAUNCH_COMMAND_WORKSPACE_PLACEHOLDER =
 	"00000000-0000-0000-0000-000000000000";
 
 /**
- * Validate a host agent and return the trusted command from a short-lived
- * lease without creating a terminal. Preset execution uses this so
+ * Validate a host agent and return its trusted command without creating a
+ * terminal. Preset execution uses this so
  * sequential / active-terminal writes can keep the current pane.
  */
 export async function resolveValidatedLaunchCommand(
 	db: HostDb,
 	input: AgentLaunchInput & { prompt?: string },
-	capabilityRefresh: CapabilityRefresher,
-	options: { now?: number } = {},
 ): Promise<{ command: string; label: string }> {
-	const { fullCommand, label } = await buildValidatedTerminalAgentLaunch(
-		db,
-		{
-			workspaceId: LAUNCH_COMMAND_WORKSPACE_PLACEHOLDER,
-			agent: input.agent,
-			prompt: input.prompt ?? "",
-			model: input.model,
-			effort: input.effort,
-			mode: input.mode,
-			speed: input.speed,
-			contextWindow: input.contextWindow,
-		},
-		capabilityRefresh,
-		options,
-	);
+	const { fullCommand, label } = await buildValidatedTerminalAgentLaunch(db, {
+		workspaceId: LAUNCH_COMMAND_WORKSPACE_PLACEHOLDER,
+		agent: input.agent,
+		prompt: input.prompt ?? "",
+		model: input.model,
+		effort: input.effort,
+		mode: input.mode,
+		speed: input.speed,
+		contextWindow: input.contextWindow,
+	});
 	return { command: fullCommand, label };
 }
 
 export function buildTerminalAgentLaunch(
 	db: HostDb,
 	input: AgentRunInput,
-	lease: ValidatedCapabilityLease,
-	options: { now?: number } = {},
+	validated: ValidatedLaunchSelection,
 ): { fullCommand: string; label: string } {
 	const config = resolveHostAgentConfig(db, input.agent);
 	if (!config) {
@@ -695,7 +583,7 @@ export function buildTerminalAgentLaunch(
 			message: `No host agent config matching '${input.agent}' — the agent may have been removed or this host's agents were reset. Re-select an agent (or use a preset id like "claude").`,
 		});
 	}
-	assertCapabilityLeaseMatches(config, input, lease, options.now);
+	assertValidatedLaunchSelectionMatches(config, input, validated);
 	validateAgentResumeSelection(config, input.resumeSessionId);
 
 	const resolvedAttachments: Array<{ attachmentId: string; path: string }> = [];
@@ -715,18 +603,18 @@ export function buildTerminalAgentLaunch(
 		config.presetId,
 		input.model,
 		input.contextWindow,
-		lease.allowedModelIds,
+		validated.allowedModelIds,
 	);
 	const effortArgs = buildAgentEffortArgs(
 		config.presetId,
 		input.effort,
 		input.model,
-		lease.reasoning?.state === "supported"
+		validated.reasoning?.state === "supported"
 			? {
-					defaultEffortId: lease.reasoning.defaultId,
-					efforts: lease.reasoning.options,
+					defaultEffortId: validated.reasoning.defaultId,
+					efforts: validated.reasoning.options,
 				}
-			: lease.reasoning?.state === "unsupported"
+			: validated.reasoning?.state === "unsupported"
 				? { efforts: [] }
 				: undefined,
 	);
@@ -745,7 +633,7 @@ export function buildTerminalAgentLaunch(
 	const modelEnv = buildAgentModelEnv(
 		config.presetId,
 		input.model,
-		lease.allowedModelIds,
+		validated.allowedModelIds,
 	);
 	return {
 		fullCommand: `${envOverlayPrefix({ ...config.env, ...modelEnv })}${command}`,
@@ -754,11 +642,15 @@ export function buildTerminalAgentLaunch(
 }
 
 async function runTerminalAgent(
-	ctx: Pick<HostServiceContext, "capabilityRefresh" | "db" | "eventBus">,
+	ctx: Pick<HostServiceContext, "db" | "eventBus">,
 	input: AgentRunInput,
-	lease: ValidatedCapabilityLease,
+	validated: ValidatedLaunchSelection,
 ): Promise<AgentRunResult> {
-	const { fullCommand, label } = buildTerminalAgentLaunch(ctx.db, input, lease);
+	const { fullCommand, label } = buildTerminalAgentLaunch(
+		ctx.db,
+		input,
+		validated,
+	);
 
 	const terminalId = crypto.randomUUID();
 	const result = await createTerminalSessionInternal({
@@ -795,18 +687,8 @@ export async function runAgentInWorkspace(
 			message: `Workspace ${input.workspaceId} not found on this host — it may have been deleted.`,
 		});
 	}
-	const lease = await validateAgentLaunchSelection(
-		ctx.db,
-		input,
-		ctx.capabilityRefresh,
-	);
-	if (!lease) {
-		throw new TRPCError({
-			code: "INTERNAL_SERVER_ERROR",
-			message: `Missing capability lease for ${input.agent}.`,
-		});
-	}
-	return runTerminalAgent(ctx, input, lease);
+	const validated = await validateAgentLaunchSelection(ctx.db, input);
+	return runTerminalAgent(ctx, input, validated);
 }
 
 const agentLaunchSelectionInput = {
@@ -840,6 +722,6 @@ export const agentsRouter = router({
 			}),
 		)
 		.mutation(async ({ ctx, input }) =>
-			resolveValidatedLaunchCommand(ctx.db, input, ctx.capabilityRefresh),
+			resolveValidatedLaunchCommand(ctx.db, input),
 		),
 });

@@ -1,5 +1,9 @@
 import type { AppRouter } from "@superset/host-service";
-import { useQuery } from "@tanstack/react-query";
+import {
+	type QueryClient,
+	useQuery,
+	useQueryClient,
+} from "@tanstack/react-query";
 import type { inferRouterOutputs } from "@trpc/server";
 import { useMemo } from "react";
 import type { AgentSelectAgent } from "renderer/components/AgentSelect";
@@ -13,10 +17,6 @@ import {
 	hostAgentCapabilityRefreshQueryKey,
 	hostAgentCapabilitySnapshotQueryKey,
 } from "./capabilityQueryKeys";
-import {
-	mergeCapabilityViews,
-	resolveAgentChoicesFetched,
-} from "./mergeCapabilityViews";
 
 type HostServiceRouterOutputs = inferRouterOutputs<AppRouter>;
 
@@ -33,8 +33,6 @@ interface UseV2AgentChoicesOptions {
 	refresh?: boolean;
 }
 
-const CAPABILITY_PICKER_FRESHNESS_MS = 5 * 60 * 1_000;
-
 export function groupAgentsByAvailability(
 	agents: readonly AgentSelectAgent[],
 ): { ready: AgentSelectAgent[]; unavailable: AgentSelectAgent[] } {
@@ -44,10 +42,35 @@ export function groupAgentsByAvailability(
 	};
 }
 
+export function resolveAgentChoicesFetched(input: {
+	configsFetched: boolean;
+	snapshotsFetched: boolean;
+	snapshotCount: number;
+	refreshEnabled: boolean;
+	refreshSettled: boolean;
+}): boolean {
+	if (!input.configsFetched || !input.snapshotsFetched) return false;
+	if (!input.refreshEnabled || input.snapshotCount > 0) return true;
+	return input.refreshSettled;
+}
+
+export async function publishCapabilityRefresh(
+	queryClient: QueryClient,
+	hostUrl: string,
+	refreshed: AgentChoiceCapability[],
+): Promise<void> {
+	const snapshotKey = hostAgentCapabilitySnapshotQueryKey(hostUrl);
+	// A cold snapshot read may still be in flight. Cancel it before publishing
+	// the newer refresh so its older response cannot win the race afterward.
+	await queryClient.cancelQueries({ queryKey: snapshotKey });
+	queryClient.setQueryData(snapshotKey, refreshed);
+}
+
 export function useV2AgentChoices(
 	hostUrl: string | null,
 	options: UseV2AgentChoicesOptions = {},
 ): UseV2AgentChoicesResult {
+	const queryClient = useQueryClient();
 	const query = useV2AgentConfigs(hostUrl);
 	const refreshEnabled = options.refresh !== false;
 	const snapshotsQuery = useQuery({
@@ -65,23 +88,33 @@ export function useV2AgentChoices(
 	const refreshQuery = useQuery({
 		queryKey: hostAgentCapabilityRefreshQueryKey(hostUrl),
 		enabled: !!hostUrl && refreshEnabled,
-		queryFn: () => {
-			if (!hostUrl) return [] satisfies AgentChoiceCapability[];
-			return getHostServiceClientByUrl(
+		queryFn: async () => {
+			if (!hostUrl) return 0;
+			const refreshed = await getHostServiceClientByUrl(
 				hostUrl,
 			).settings.agentConfigs.refreshCapabilities.mutate({});
+			await publishCapabilityRefresh(queryClient, hostUrl, refreshed);
+			return refreshed.length;
 		},
-		staleTime: CAPABILITY_PICKER_FRESHNESS_MS,
-		refetchOnWindowFocus: true,
+		// One explicit refresh per host and renderer lifetime. Ctrl+R creates a new
+		// QueryClient, while focus, reconnects, and additional picker mounts reuse
+		// this settled session query.
+		staleTime: Number.POSITIVE_INFINITY,
+		gcTime: Number.POSITIVE_INFINITY,
+		retry: false,
+		refetchOnMount: false,
+		refetchOnWindowFocus: false,
+		refetchOnReconnect: false,
 	});
 	const capabilitiesByAgentId = useMemo(
 		() =>
 			new Map(
-				mergeCapabilityViews(snapshotsQuery.data ?? [], refreshQuery.data).map(
-					(capability) => [capability.agentId, capability],
-				),
+				(snapshotsQuery.data ?? []).map((capability) => [
+					capability.agentId,
+					capability,
+				]),
 			),
-		[snapshotsQuery.data, refreshQuery.data],
+		[snapshotsQuery.data],
 	);
 	const isFetched = resolveAgentChoicesFetched({
 		configsFetched: query.isFetched,

@@ -6,6 +6,6 @@ export {
 	buildValidatedTerminalAgentLaunch,
 	resolveValidatedLaunchCommand,
 	runAgentInWorkspace,
-	type ValidatedCapabilityLease,
+	type ValidatedLaunchSelection,
 	validateAgentLaunchSelection,
 } from "./agents";
