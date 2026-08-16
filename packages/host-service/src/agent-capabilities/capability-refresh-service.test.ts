@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as childProcess from "node:child_process";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -18,12 +18,9 @@ import {
 } from "./agent-capabilities";
 import {
 	CapabilityRefreshService,
-	clearCapabilityRefreshState,
 	ObsoleteCapabilityRefreshError,
 	type RevisionedAgentCapabilityConfig,
 	readPersistedCapabilitySnapshots,
-	refreshAgentCapabilities,
-	refreshAgentCapability,
 } from "./capability-refresh-service";
 import {
 	CAPABILITY_INVENTORY_SCHEMA_VERSION,
@@ -40,8 +37,6 @@ const nodeErrorSchema = z.object({ code: z.string() });
 const CHECKED_AT = "2026-08-14T12:00:00.000Z";
 const CHECKED_AT_MS = Date.parse(CHECKED_AT);
 
-beforeEach(() => clearCapabilityRefreshState());
-
 function createTestDb(): HostDb {
 	const sqlite = new Database(":memory:");
 	const bunDb = drizzle(sqlite, { schema });
@@ -49,6 +44,32 @@ function createTestDb(): HostDb {
 	sqlite.exec("PRAGMA foreign_keys = ON");
 	// SAFETY: Tests use Bun's SQLite driver, whose run result differs nominally from HostDb; repository operations used here are otherwise identical.
 	return bunDb as unknown as HostDb;
+}
+
+const refreshServices = new WeakMap<HostDb, CapabilityRefreshService>();
+
+function getRefreshService(db: HostDb): CapabilityRefreshService {
+	const existing = refreshServices.get(db);
+	if (existing) return existing;
+	const service = new CapabilityRefreshService(db);
+	refreshServices.set(db, service);
+	return service;
+}
+
+function refreshAgentCapability(
+	db: HostDb,
+	config: RevisionedAgentCapabilityConfig,
+	options: Parameters<CapabilityRefreshService["refreshCapability"]>[1] = {},
+): ReturnType<CapabilityRefreshService["refreshCapability"]> {
+	return getRefreshService(db).refreshCapability(config, options);
+}
+
+function refreshAgentCapabilities(
+	db: HostDb,
+	configs: RevisionedAgentCapabilityConfig[],
+	options: Parameters<CapabilityRefreshService["refreshCapabilities"]>[1] = {},
+): ReturnType<CapabilityRefreshService["refreshCapabilities"]> {
+	return getRefreshService(db).refreshCapabilities(configs, options);
 }
 
 function seedConfig(
@@ -59,6 +80,7 @@ function seedConfig(
 		id,
 		presetId: "codex",
 		command: "codex",
+		args: [],
 		env: {},
 		configRevision: 1,
 	};

@@ -12,18 +12,14 @@ import type { HostDb } from "../../../db";
 import * as schema from "../../../db/schema";
 import type { HostServiceContext } from "../../../types";
 import {
-	AgentLaunchCapabilityError,
 	type AgentLaunchSelection,
 	agentsRouter,
 	buildAgentCommandString,
 	buildTerminalAgentLaunch,
 	type ValidatedLaunchSelection,
-	validateAgentContextWindowSelection,
 	validateAgentEffortSelection,
 	validateAgentLaunchSelection,
-	validateAgentModeSelection,
 	validateAgentResumeSelection,
-	validateAgentSpeedSelection,
 } from "./agents";
 
 const argvConfig = {
@@ -364,31 +360,7 @@ describe("buildTerminalAgentLaunch", () => {
 		);
 	});
 
-	it("forwards Claude Code fast mode as an escaped settings override", async () => {
-		const db = createTestDb();
-		const config = seedConfig(db);
-		const selection = { model: "claude-opus-5", speed: "fast" };
-		const validated = await validateFromSnapshot(
-			db,
-			{ agent: "claude", ...selection },
-			fallbackSnapshot(config),
-		);
-		const launch = buildTerminalAgentLaunch(
-			db,
-			{
-				workspaceId: WORKSPACE_ID,
-				agent: "claude",
-				prompt: "do the thing",
-				...selection,
-			},
-			validated,
-		);
-		expect(launch.fullCommand).toBe(
-			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--model' 'claude-opus-5' '--settings' '{\"fastMode\":true}' 'do the thing'",
-		);
-	});
-
-	it("keeps OpenCode reasoning variants independent from agent modes", async () => {
+	it("forwards OpenCode reasoning variants as effort", async () => {
 		const db = createTestDb();
 		const config = {
 			id: OPENCODE_CONFIG_ID,
@@ -413,7 +385,6 @@ describe("buildTerminalAgentLaunch", () => {
 		const selection = {
 			model: "openai/gpt-5.6-sol",
 			effort: "high",
-			mode: "plan",
 		};
 		const validated = await validateFromSnapshot(
 			db,
@@ -431,35 +402,7 @@ describe("buildTerminalAgentLaunch", () => {
 			validated,
 		);
 		expect(launch.fullCommand).toBe(
-			"'opencode' '--model' 'openai/gpt-5.6-sol' '--variant' 'high' '--agent' 'plan' 'do the thing'",
-		);
-	});
-
-	it("combines Claude Code Fast Mode and Ultracode settings", async () => {
-		const db = createTestDb();
-		const config = seedConfig(db);
-		const selection = {
-			model: "claude-opus-5",
-			effort: "ultracode",
-			speed: "fast",
-		};
-		const validated = await validateFromSnapshot(
-			db,
-			{ agent: "claude", ...selection },
-			fallbackSnapshot(config),
-		);
-		const launch = buildTerminalAgentLaunch(
-			db,
-			{
-				workspaceId: WORKSPACE_ID,
-				agent: "claude",
-				prompt: "do the thing",
-				...selection,
-			},
-			validated,
-		);
-		expect(launch.fullCommand).toBe(
-			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--model' 'claude-opus-5' '--effort' 'xhigh' '--settings' '{\"fastMode\":true,\"ultracode\":true}' 'do the thing'",
+			"'opencode' '--model' 'openai/gpt-5.6-sol' '--variant' 'high' 'do the thing'",
 		);
 	});
 
@@ -484,54 +427,6 @@ describe("buildTerminalAgentLaunch", () => {
 		);
 		expect(launch.fullCommand).toBe(
 			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--model' 'claude-opus-5' 'ultrathink about this change'",
-		);
-	});
-
-	it("forwards Claude Haiku Thinking as a settings override", async () => {
-		const db = createTestDb();
-		const config = seedConfig(db);
-		const selection = { model: "claude-haiku-4-5", effort: "on" };
-		const validated = await validateFromSnapshot(
-			db,
-			{ agent: "claude", ...selection },
-			fallbackSnapshot(config),
-		);
-		const launch = buildTerminalAgentLaunch(
-			db,
-			{
-				workspaceId: WORKSPACE_ID,
-				agent: "claude",
-				prompt: "do the thing",
-				...selection,
-			},
-			validated,
-		);
-		expect(launch.fullCommand).toBe(
-			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--model' 'claude-haiku-4-5' '--settings' '{\"alwaysThinkingEnabled\":true}' 'do the thing'",
-		);
-	});
-
-	it("forwards a supported Claude Code context window in the model id", async () => {
-		const db = createTestDb();
-		const config = seedConfig(db);
-		const selection = { model: "claude-opus-5", contextWindow: "1m" };
-		const validated = await validateFromSnapshot(
-			db,
-			{ agent: "claude", ...selection },
-			fallbackSnapshot(config),
-		);
-		const launch = buildTerminalAgentLaunch(
-			db,
-			{
-				workspaceId: WORKSPACE_ID,
-				agent: "claude",
-				prompt: "do the thing",
-				...selection,
-			},
-			validated,
-		);
-		expect(launch.fullCommand).toBe(
-			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--model' 'claude-opus-5[1m]' 'do the thing'",
 		);
 	});
 
@@ -624,7 +519,7 @@ describe("buildTerminalAgentLaunch", () => {
 		const config = seedConfig(db);
 		const validated = await validateFromSnapshot(
 			db,
-			{ agent: "claude", model: "claude-fable-5" },
+			{ agent: "claude", model: "fable" },
 			fallbackSnapshot(config),
 		);
 		try {
@@ -642,9 +537,6 @@ describe("buildTerminalAgentLaunch", () => {
 		} catch (error) {
 			expect(error).toBeInstanceOf(TRPCError);
 			expect((error as TRPCError).code).toBe("BAD_REQUEST");
-			expect((error as TRPCError).cause).toMatchObject({
-				kind: "selection_mismatch",
-			});
 		}
 	});
 
@@ -675,9 +567,6 @@ describe("buildTerminalAgentLaunch", () => {
 		} catch (error) {
 			expect(error).toBeInstanceOf(TRPCError);
 			expect((error as TRPCError).code).toBe("PRECONDITION_FAILED");
-			expect((error as TRPCError).cause).toMatchObject({
-				kind: "config_changed",
-			});
 		}
 	});
 
@@ -901,14 +790,8 @@ describe("validateAgentEffortSelection", () => {
 		} catch (error) {
 			expect(error).toBeInstanceOf(TRPCError);
 			expect((error as TRPCError).code).toBe("BAD_REQUEST");
-			expect((error as TRPCError).cause).toMatchObject({
-				kind: "unsupported_trait",
-			});
-			expect((error as TRPCError).cause).toBeInstanceOf(
-				AgentLaunchCapabilityError,
-			);
 			expect((error as Error).message).toBe(
-				'Unsupported reasoning effort "extreme" for Codex. Choose one of: low, medium, high, xhigh, max, ultra.',
+				'Unsupported reasoning effort "extreme" for Codex. Choose one of: low, medium, high, xhigh.',
 			);
 		}
 	});
@@ -923,56 +806,6 @@ describe("validateAgentEffortSelection", () => {
 			expect((error as Error).message).toBe(
 				"Superset does not support a reasoning effort override. Omit effort to use the agent default.",
 			);
-		}
-	});
-});
-
-describe("validateAgentModeSelection", () => {
-	it("rejects an unknown OpenCode mode", () => {
-		try {
-			validateAgentModeSelection("opencode", "OpenCode", "review");
-			throw new Error("Expected validation to fail");
-		} catch (error) {
-			expect(error).toBeInstanceOf(TRPCError);
-			expect((error as TRPCError).cause).toMatchObject({
-				kind: "unsupported_trait",
-			});
-			expect((error as Error).message).toContain(
-				'Unsupported mode "review" for OpenCode',
-			);
-		}
-	});
-});
-
-describe("validateAgentSpeedSelection", () => {
-	it("rejects Fast Mode on a Claude model that does not support it", () => {
-		try {
-			validateAgentSpeedSelection("claude", "Claude", "fast", "claude-fable-5");
-			throw new Error("Expected validation to fail");
-		} catch (error) {
-			expect(error).toBeInstanceOf(TRPCError);
-			expect((error as TRPCError).cause).toMatchObject({
-				kind: "unsupported_trait",
-			});
-		}
-	});
-});
-
-describe("validateAgentContextWindowSelection", () => {
-	it("rejects a context window the selected model does not advertise", () => {
-		try {
-			validateAgentContextWindowSelection(
-				"claude",
-				"Claude",
-				"1m",
-				"claude-opus-4-8",
-			);
-			throw new Error("Expected validation to fail");
-		} catch (error) {
-			expect(error).toBeInstanceOf(TRPCError);
-			expect((error as TRPCError).cause).toMatchObject({
-				kind: "unsupported_trait",
-			});
 		}
 	});
 });
@@ -1021,14 +854,13 @@ describe("validateAgentLaunchSelection", () => {
 		const validated = await validateAgentLaunchSelection(db, {
 			agent: "claude",
 			model: "claude-opus-5",
-			speed: "fast",
 		});
 
 		expect(validated).toMatchObject({
 			agentId: config.id,
 			presetId: "claude",
 			configRevision: 1,
-			selection: { model: "claude-opus-5", speed: "fast" },
+			selection: { model: "claude-opus-5" },
 			allowedModelIds: ["claude-opus-5"],
 		});
 	});
@@ -1085,9 +917,6 @@ describe("validateAgentLaunchSelection", () => {
 			throw new Error("Expected validation to fail");
 		} catch (error) {
 			expect(error).toBeInstanceOf(TRPCError);
-			expect((error as TRPCError).cause).toMatchObject({
-				kind: "retired_model",
-			});
 		}
 	});
 
@@ -1134,9 +963,6 @@ describe("validateAgentLaunchSelection", () => {
 			throw new Error("Expected validation to fail");
 		} catch (error) {
 			expect(error).toBeInstanceOf(TRPCError);
-			expect((error as TRPCError).cause).toMatchObject({
-				kind: "unsupported_trait",
-			});
 		}
 	});
 });
@@ -1208,9 +1034,6 @@ describe("agents.run launch contract", () => {
 			throw new Error("Expected agents.run to fail");
 		} catch (error) {
 			expect(error).toBeInstanceOf(TRPCError);
-			expect((error as TRPCError).cause).toMatchObject({
-				kind: "retired_model",
-			});
 		}
 	});
 
@@ -1287,9 +1110,6 @@ describe("agents.run launch contract", () => {
 			throw new Error("Expected resolveLaunchCommand to fail");
 		} catch (error) {
 			expect(error).toBeInstanceOf(TRPCError);
-			expect((error as TRPCError).cause).toMatchObject({
-				kind: "retired_model",
-			});
 		}
 		expect(db.select().from(schema.terminalSessions).all()).toEqual([]);
 	});
@@ -1333,9 +1153,6 @@ describe("agents.run launch contract", () => {
 			throw new Error("Expected resume preflight to fail");
 		} catch (error) {
 			expect(error).toBeInstanceOf(TRPCError);
-			expect((error as TRPCError).cause).toMatchObject({
-				kind: "retired_model",
-			});
 		}
 	});
 });

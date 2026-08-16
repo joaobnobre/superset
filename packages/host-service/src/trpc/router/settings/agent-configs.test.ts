@@ -517,7 +517,7 @@ describe("agentConfigsRouter", () => {
 			expect(cleared.iconId).toBeNull();
 		});
 
-		it("increments capability revision and deletes snapshots for command and env changes", async () => {
+		it("increments capability revision and deletes snapshots for command, args, and env changes", async () => {
 			const { db, caller } = createCallerWithDb();
 			const first = await listFirst(caller);
 			const original = db
@@ -553,6 +553,28 @@ describe("agentConfigsRouter", () => {
 			insertHealthSnapshot(db, afterCommand);
 			await caller.update({
 				id: first.id,
+				patch: { args: [...first.args, "--new-discovery-arg"] },
+			});
+			const afterArgs = db
+				.select()
+				.from(schema.hostAgentConfigs)
+				.where(eq(schema.hostAgentConfigs.id, first.id))
+				.get();
+			expect(afterArgs?.capabilityRevision).toBe(
+				afterCommand.capabilityRevision + 1,
+			);
+			expect(
+				db
+					.select()
+					.from(schema.hostAgentCapabilitySnapshots)
+					.where(eq(schema.hostAgentCapabilitySnapshots.agentId, first.id))
+					.get()?.configRevision,
+			).toBe(afterArgs?.capabilityRevision);
+
+			if (!afterArgs) return;
+			insertHealthSnapshot(db, afterArgs);
+			await caller.update({
+				id: first.id,
 				patch: { env: { TEST_CAPABILITY_ENV: "changed" } },
 			});
 			const afterEnv = db
@@ -561,7 +583,7 @@ describe("agentConfigsRouter", () => {
 				.where(eq(schema.hostAgentConfigs.id, first.id))
 				.get();
 			expect(afterEnv?.capabilityRevision).toBe(
-				afterCommand.capabilityRevision + 1,
+				afterArgs.capabilityRevision + 1,
 			);
 			expect(
 				db
@@ -589,7 +611,6 @@ describe("agentConfigsRouter", () => {
 				patch: {
 					label: "Display Only",
 					command: first.command,
-					args: ["--new-launch-arg"],
 					promptArgs: ["--prompt"],
 					resumeArgs: ["--resume-new"],
 					iconId: "codex",

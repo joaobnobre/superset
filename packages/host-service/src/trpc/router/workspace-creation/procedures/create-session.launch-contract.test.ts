@@ -64,9 +64,6 @@ describe("createSession launch contract", () => {
 			throw new Error("Expected createSession to fail");
 		} catch (error) {
 			expect(error).toBeInstanceOf(TRPCError);
-			expect((error as TRPCError).cause).toMatchObject({
-				kind: "retired_model",
-			});
 		}
 		expect(db.select().from(schema.workspaces).all()).toEqual([]);
 	});

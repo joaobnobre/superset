@@ -1,3 +1,4 @@
+import type { HostAgentConfig } from "@superset/host-service/settings";
 import {
 	Select,
 	SelectContent,
@@ -12,17 +13,13 @@ import { cn } from "@superset/ui/utils";
 import { LuPlus } from "react-icons/lu";
 import { usePresetIcon } from "renderer/assets/app-icons/preset-icons";
 import type { TerminalAgentBinding } from "renderer/hooks/host-service/useTerminalAgentBindings";
-import {
-	type DiffCommentAgentChoice,
-	EXISTING_PREFIX,
-	NEW_PREFIX,
-} from "../../hooks/useDiffCommentTarget";
+import { EXISTING_PREFIX, NEW_PREFIX } from "../../hooks/useDiffCommentTarget";
 
 interface AgentPickerSelectProps {
 	value: string | null;
 	onValueChange: (next: string) => void;
 	sessions: TerminalAgentBinding[];
-	configs: DiffCommentAgentChoice[];
+	configs: HostAgentConfig[];
 }
 
 export function AgentPickerSelect({
@@ -69,13 +66,11 @@ export function AgentPickerSelect({
 							<SelectItem
 								key={config.id}
 								value={`${NEW_PREFIX}${config.id}`}
-								disabled={config.disabled}
 								className="text-[12px]"
 							>
 								<NewSessionOption
 									label={config.label}
-									presetId={config.presetId ?? config.id}
-									disabled={config.disabled}
+									presetId={config.presetId}
 								/>
 							</SelectItem>
 						))}
@@ -109,11 +104,9 @@ function ExistingSessionOption({ binding }: { binding: TerminalAgentBinding }) {
 function NewSessionOption({
 	label,
 	presetId,
-	disabled,
 }: {
 	label: string;
 	presetId: string;
-	disabled?: boolean;
 }) {
 	const iconSrc = usePresetIcon(presetId);
 	return (
@@ -129,9 +122,6 @@ function NewSessionOption({
 				<LuPlus className="size-3 text-muted-foreground" />
 			)}
 			<span>{label}</span>
-			{disabled ? (
-				<span className="text-muted-foreground/70">· unavailable</span>
-			) : null}
 		</span>
 	);
 }

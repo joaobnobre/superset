@@ -11,17 +11,6 @@ export const MODEL_STORAGE_KEY = "lastSelectedV2WorkspaceCreateModelByPreset";
 // JSON map of presetId:modelId → effort id (presetId for model-less agents).
 export const EFFORT_STORAGE_KEY = "lastSelectedV2WorkspaceCreateEffortByPreset";
 
-// JSON map of presetId → agent mode id.
-export const MODE_TRAIT_STORAGE_KEY =
-	"lastSelectedV2WorkspaceCreateModeByPreset";
-
-// JSON map of presetId:modelId → performance mode.
-export const SPEED_STORAGE_KEY = "lastSelectedV2WorkspaceCreateSpeedByPreset";
-
-// JSON map of presetId:modelId → context-window id.
-export const CONTEXT_WINDOW_STORAGE_KEY =
-	"lastSelectedV2WorkspaceCreateContextWindowByModel";
-
 export const PILL_BUTTON_CLASS =
 	"!h-[22px] min-h-0 rounded-md border-[0.5px] border-border bg-foreground/[0.04] shadow-none text-[11px]";
 

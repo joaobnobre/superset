@@ -2,14 +2,9 @@ import {
 	type AgentCapabilityTrait,
 	type AgentModelOption,
 	buildAgentEffortArgs,
-	buildAgentModeArgs,
 	buildAgentModelArgs,
 	buildAgentModelEnv,
-	buildAgentRuntimeTraitArgs,
-	getAgentContextWindowSupport,
 	getAgentModelSupport,
-	getAgentModeSupport,
-	getAgentSpeedSupport,
 	resolveAgentEffortSupport,
 } from "@superset/shared/agent-models";
 import {
@@ -27,7 +22,6 @@ import type { HostDb } from "../../../db";
 import { hostAgentConfigs, workspaces } from "../../../db/schema";
 import { createTerminalSessionInternal } from "../../../terminal/terminal";
 import type { HostServiceContext } from "../../../types";
-import type { AgentLaunchCapabilityErrorKind } from "../../error-types";
 import { protectedProcedure, router } from "../../index";
 import { resolveAttachmentPath } from "../attachments/storage";
 import {
@@ -162,9 +156,6 @@ export interface AgentRunInput {
 	attachmentIds?: string[];
 	model?: string;
 	effort?: string;
-	mode?: string;
-	speed?: string;
-	contextWindow?: string;
 	/** Session id of a previous run of this agent to restore (e.g. a killed
 	 * session's `agentSessionId`). The prompt may be empty when resuming. */
 	resumeSessionId?: string;
@@ -176,14 +167,9 @@ export type AgentRunResult = {
 	label: string;
 };
 
-export type { AgentLaunchCapabilityErrorKind };
-
 export interface AgentLaunchSelection {
 	model?: string;
 	effort?: string;
-	mode?: string;
-	speed?: string;
-	contextWindow?: string;
 }
 
 const validatedLaunchSelectionBrand = Symbol("ValidatedLaunchSelection");
@@ -201,28 +187,16 @@ export interface ValidatedLaunchSelection {
 
 export type AgentLaunchInput = Pick<
 	AgentRunInput,
-	"agent" | "model" | "effort" | "mode" | "speed" | "contextWindow"
+	"agent" | "model" | "effort"
 >;
-
-export class AgentLaunchCapabilityError extends Error {
-	constructor(
-		readonly kind: AgentLaunchCapabilityErrorKind,
-		message: string,
-	) {
-		super(message);
-		this.name = "AgentLaunchCapabilityError";
-	}
-}
 
 function capabilitySelectionError(
 	code: "BAD_REQUEST" | "PRECONDITION_FAILED",
-	kind: AgentLaunchCapabilityErrorKind,
 	message: string,
 ): TRPCError {
 	return new TRPCError({
 		code,
 		message,
-		cause: new AgentLaunchCapabilityError(kind, message),
 	});
 }
 
@@ -230,9 +204,6 @@ function launchSelectionOf(input: AgentLaunchSelection): AgentLaunchSelection {
 	const selection: AgentLaunchSelection = {};
 	if (input.model) selection.model = input.model;
 	if (input.effort) selection.effort = input.effort;
-	if (input.mode) selection.mode = input.mode;
-	if (input.speed) selection.speed = input.speed;
-	if (input.contextWindow) selection.contextWindow = input.contextWindow;
 	return selection;
 }
 
@@ -242,13 +213,7 @@ function sameLaunchSelection(
 ): boolean {
 	const a = launchSelectionOf(left);
 	const b = launchSelectionOf(right);
-	return (
-		a.model === b.model &&
-		a.effort === b.effort &&
-		a.mode === b.mode &&
-		a.speed === b.speed &&
-		a.contextWindow === b.contextWindow
-	);
+	return a.model === b.model && a.effort === b.effort;
 }
 
 export function resolveAllowedLaunchModelIds(
@@ -281,7 +246,6 @@ export function validateAgentEffortSelection(
 	if (!support) {
 		throw capabilitySelectionError(
 			"BAD_REQUEST",
-			"unsupported_trait",
 			`${label} does not support a reasoning effort override. Omit effort to use the agent default.`,
 		);
 	}
@@ -289,7 +253,6 @@ export function validateAgentEffortSelection(
 	if (!support.efforts.some((option) => option.id === effort)) {
 		throw capabilitySelectionError(
 			"BAD_REQUEST",
-			"unsupported_trait",
 			`Unsupported reasoning effort "${effort}" for ${label}. Choose one of: ${support.efforts.map((option) => option.id).join(", ")}.`,
 		);
 	}
@@ -306,7 +269,6 @@ export function validateAgentModelSelection(
 	if (!transport?.modelFlag && !transport?.modelEnv) {
 		throw capabilitySelectionError(
 			"BAD_REQUEST",
-			"unsupported_trait",
 			`${label} does not support a model override. Omit model to use the agent default.`,
 		);
 	}
@@ -314,64 +276,7 @@ export function validateAgentModelSelection(
 	if (!allowed.includes(model)) {
 		throw capabilitySelectionError(
 			"BAD_REQUEST",
-			"retired_model",
 			`Model "${model}" is not available for ${label}.`,
-		);
-	}
-}
-
-export function validateAgentModeSelection(
-	presetId: string,
-	label: string,
-	mode: string | undefined,
-): void {
-	if (!mode) return;
-	const support = getAgentModeSupport(presetId);
-	if (!support?.modes.some((option) => option.id === mode)) {
-		throw capabilitySelectionError(
-			"BAD_REQUEST",
-			"unsupported_trait",
-			support
-				? `Unsupported mode "${mode}" for ${label}. Choose one of: ${support.modes.map((option) => option.id).join(", ")}.`
-				: `${label} does not support a mode override. Omit mode to use the agent default.`,
-		);
-	}
-}
-
-export function validateAgentSpeedSelection(
-	presetId: string,
-	label: string,
-	speed: string | undefined,
-	model?: string,
-): void {
-	if (!speed) return;
-	const support = getAgentSpeedSupport(presetId, model);
-	if (!support?.speeds.some((option) => option.id === speed)) {
-		throw capabilitySelectionError(
-			"BAD_REQUEST",
-			"unsupported_trait",
-			support
-				? `Unsupported speed "${speed}" for ${label}. Choose one of: ${support.speeds.map((option) => option.id).join(", ")}.`
-				: `${label} does not support a speed override for the selected model. Omit speed to use the agent default.`,
-		);
-	}
-}
-
-export function validateAgentContextWindowSelection(
-	presetId: string,
-	label: string,
-	contextWindow: string | undefined,
-	model?: string,
-): void {
-	if (!contextWindow) return;
-	const support = getAgentContextWindowSupport(presetId, model);
-	if (!support?.contextWindows.some((option) => option.id === contextWindow)) {
-		throw capabilitySelectionError(
-			"BAD_REQUEST",
-			"unsupported_trait",
-			support
-				? `Unsupported context window "${contextWindow}" for ${label}. Choose one of: ${support.contextWindows.map((option) => option.id).join(", ")}.`
-				: `${label} does not support a context window override for the selected model. Omit contextWindow to use the agent default.`,
 		);
 	}
 }
@@ -390,19 +295,6 @@ function validateExplicitLaunchSelection(
 		selection.effort,
 		selection.model,
 		reasoning,
-	);
-	validateAgentModeSelection(presetId, label, selection.mode);
-	validateAgentSpeedSelection(
-		presetId,
-		label,
-		selection.speed,
-		selection.model,
-	);
-	validateAgentContextWindowSelection(
-		presetId,
-		label,
-		selection.contextWindow,
-		selection.model,
 	);
 }
 
@@ -453,14 +345,12 @@ function assertValidatedLaunchSelectionMatches(
 	) {
 		throw capabilitySelectionError(
 			"PRECONDITION_FAILED",
-			"config_changed",
 			`${config.label} changed while its capabilities were being validated. Retry the launch.`,
 		);
 	}
 	if (!sameLaunchSelection(validated.selection, input)) {
 		throw capabilitySelectionError(
 			"BAD_REQUEST",
-			"selection_mismatch",
 			`${config.label} validated selection does not match the requested launch selection.`,
 		);
 	}
@@ -561,9 +451,6 @@ export async function resolveValidatedLaunchCommand(
 		prompt: input.prompt ?? "",
 		model: input.model,
 		effort: input.effort,
-		mode: input.mode,
-		speed: input.speed,
-		contextWindow: input.contextWindow,
 	});
 	return { command: fullCommand, label };
 }
@@ -602,7 +489,6 @@ export function buildTerminalAgentLaunch(
 	const modelArgs = buildAgentModelArgs(
 		config.presetId,
 		input.model,
-		input.contextWindow,
 		validated.allowedModelIds,
 	);
 	const effortArgs = buildAgentEffortArgs(
@@ -618,16 +504,10 @@ export function buildTerminalAgentLaunch(
 				? { efforts: [] }
 				: undefined,
 	);
-	const runtimeTraitArgs = buildAgentRuntimeTraitArgs(config.presetId, {
-		model: input.model,
-		effort: input.effort,
-		speed: input.speed,
-	});
-	const modeArgs = buildAgentModeArgs(config.presetId, input.mode);
 	const command = buildAgentCommandString(
 		config,
 		prompt,
-		[...modelArgs, ...effortArgs, ...modeArgs, ...runtimeTraitArgs],
+		[...modelArgs, ...effortArgs],
 		{ resumeSessionId: input.resumeSessionId },
 	);
 	const modelEnv = buildAgentModelEnv(
@@ -695,9 +575,6 @@ const agentLaunchSelectionInput = {
 	agent: z.string().min(1),
 	model: z.string().min(1).optional(),
 	effort: z.string().min(1).optional(),
-	mode: z.string().min(1).optional(),
-	speed: z.string().min(1).optional(),
-	contextWindow: z.string().min(1).optional(),
 };
 
 export const agentsRouter = router({

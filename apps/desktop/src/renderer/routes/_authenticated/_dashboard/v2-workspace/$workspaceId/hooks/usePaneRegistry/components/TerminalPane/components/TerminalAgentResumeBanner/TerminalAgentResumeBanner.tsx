@@ -5,11 +5,8 @@ import { workspaceTrpc } from "@superset/workspace-client";
 import { History, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTerminalResumeCandidate } from "renderer/hooks/host-service/useTerminalResumeCandidate";
-import { useWorkspaceHostUrl } from "renderer/hooks/host-service/useWorkspaceHostUrl";
-import { invalidateCapabilitiesOnLaunchError } from "renderer/hooks/useV2AgentChoices";
 import type { ConnectionState } from "renderer/lib/terminal/terminal-runtime-registry";
 import { terminalRuntimeRegistry } from "renderer/lib/terminal/terminal-runtime-registry";
-import { electronQueryClient } from "renderer/providers/ElectronTRPCProvider";
 import type {
 	PaneViewerData,
 	TerminalPaneData,
@@ -36,7 +33,6 @@ export function TerminalAgentResumeBanner({
 	connectionState,
 	ctx,
 }: TerminalAgentResumeBannerProps) {
-	const hostUrl = useWorkspaceHostUrl(workspaceId);
 	const { candidate, invalidate } = useTerminalResumeCandidate(
 		workspaceId,
 		terminalId,
@@ -90,7 +86,6 @@ export function TerminalAgentResumeBanner({
 			killReplacedSession.mutate({ workspaceId, terminalId });
 			terminalRuntimeRegistry.dispose(terminalId);
 		} catch (error) {
-			invalidateCapabilitiesOnLaunchError(electronQueryClient, hostUrl, error);
 			toast.error("Failed to resume agent session", {
 				description: error instanceof Error ? error.message : undefined,
 			});

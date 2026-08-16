@@ -117,9 +117,18 @@ function toCapabilityConfig(
 		id: row.id,
 		presetId: row.presetId,
 		command: row.command,
+		args: parseAgentArgv(row.argsJson),
 		env: parseAgentEnv(row.envJson),
 		configRevision: row.capabilityRevision,
 	};
+}
+
+function argsEqual(leftJson: string, right: string[]): boolean {
+	const left = parseAgentArgv(leftJson);
+	return (
+		left.length === right.length &&
+		left.every((value, index) => value === right[index])
+	);
 }
 
 function envsEqual(leftJson: string, right: Record<string, string>): boolean {
@@ -286,6 +295,8 @@ export const agentConfigsRouter = router({
 			const discoveryIdentityChanged =
 				(input.patch.command !== undefined &&
 					input.patch.command !== existing.command) ||
+				(input.patch.args !== undefined &&
+					!argsEqual(existing.argsJson, input.patch.args)) ||
 				(input.patch.env !== undefined &&
 					!envsEqual(existing.envJson, input.patch.env));
 			const update: Partial<typeof hostAgentConfigs.$inferInsert> = {

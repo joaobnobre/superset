@@ -1114,9 +1114,6 @@ export const workspacesRouter = router({
 						attachmentIds: soleLaunch.attachmentIds,
 						model: soleLaunch.model,
 						effort: soleLaunch.effort,
-						mode: soleLaunch.mode,
-						speed: soleLaunch.speed,
-						contextWindow: soleLaunch.contextWindow,
 					});
 				} catch (err) {
 					console.warn(

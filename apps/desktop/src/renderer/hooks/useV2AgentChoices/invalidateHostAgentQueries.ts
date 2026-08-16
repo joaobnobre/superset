@@ -15,19 +15,29 @@ export function envsEqual(
 	return leftEntries.every(([key, value]) => right[key] === value);
 }
 
+function argsEqual(left: string[], right: string[]): boolean {
+	return (
+		left.length === right.length &&
+		left.every((value, index) => value === right[index])
+	);
+}
+
 export function isDiscoveryChangingAgentPatch(
-	current: Pick<HostAgentConfig, "command" | "env">,
-	patch: { command?: string; env?: Record<string, string> },
+	current: Pick<HostAgentConfig, "command" | "args" | "env">,
+	patch: { command?: string; args?: string[]; env?: Record<string, string> },
 ): boolean {
 	if (patch.command !== undefined && patch.command !== current.command) {
+		return true;
+	}
+	if (patch.args !== undefined && !argsEqual(current.args, patch.args)) {
 		return true;
 	}
 	return patch.env !== undefined && !envsEqual(current.env, patch.env);
 }
 
 export function classifyHostAgentUpdateInvalidation(
-	current: Pick<HostAgentConfig, "command" | "env">,
-	patch: { command?: string; env?: Record<string, string> },
+	current: Pick<HostAgentConfig, "command" | "args" | "env">,
+	patch: { command?: string; args?: string[]; env?: Record<string, string> },
 ): HostAgentQueryInvalidation {
 	return isDiscoveryChangingAgentPatch(current, patch)
 		? "config-and-capabilities"

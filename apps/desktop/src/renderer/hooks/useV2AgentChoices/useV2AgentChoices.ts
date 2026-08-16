@@ -9,10 +9,7 @@ import { useMemo } from "react";
 import type { AgentSelectAgent } from "renderer/components/AgentSelect";
 import { useV2AgentConfigs } from "renderer/hooks/useV2AgentConfigs";
 import { getHostServiceClientByUrl } from "renderer/lib/host-service-client";
-import {
-	isAgentChoiceEnabled,
-	isAgentChoiceVisible,
-} from "./agentChoiceAvailability";
+import { isAgentChoiceVisible } from "./agentChoiceAvailability";
 import {
 	hostAgentCapabilityRefreshQueryKey,
 	hostAgentCapabilitySnapshotQueryKey,
@@ -31,27 +28,6 @@ interface UseV2AgentChoicesResult {
 
 interface UseV2AgentChoicesOptions {
 	refresh?: boolean;
-}
-
-export function groupAgentsByAvailability(
-	agents: readonly AgentSelectAgent[],
-): { ready: AgentSelectAgent[]; unavailable: AgentSelectAgent[] } {
-	return {
-		ready: agents.filter((agent) => !agent.disabled),
-		unavailable: agents.filter((agent) => agent.disabled),
-	};
-}
-
-export function resolveAgentChoicesFetched(input: {
-	configsFetched: boolean;
-	snapshotsFetched: boolean;
-	snapshotCount: number;
-	refreshEnabled: boolean;
-	refreshSettled: boolean;
-}): boolean {
-	if (!input.configsFetched || !input.snapshotsFetched) return false;
-	if (!input.refreshEnabled || input.snapshotCount > 0) return true;
-	return input.refreshSettled;
 }
 
 export async function publishCapabilityRefresh(
@@ -85,7 +61,7 @@ export function useV2AgentChoices(
 		staleTime: Number.POSITIVE_INFINITY,
 		refetchOnWindowFocus: false,
 	});
-	const refreshQuery = useQuery({
+	useQuery({
 		queryKey: hostAgentCapabilityRefreshQueryKey(hostUrl),
 		enabled: !!hostUrl && refreshEnabled,
 		queryFn: async () => {
@@ -116,30 +92,21 @@ export function useV2AgentChoices(
 			),
 		[snapshotsQuery.data],
 	);
-	const isFetched = resolveAgentChoicesFetched({
-		configsFetched: query.isFetched,
-		snapshotsFetched: snapshotsQuery.isFetched,
-		snapshotCount: snapshotsQuery.data?.length ?? 0,
-		refreshEnabled,
-		refreshSettled: refreshQuery.isFetched,
-	});
+	const isFetched = query.isFetched;
 	const agents = useMemo<AgentSelectAgent[]>(() => {
 		if (!query.data || !isFetched) return [];
-		const terminalAgents: AgentSelectAgent[] = query.data
+		return query.data
 			.filter((config) =>
 				isAgentChoiceVisible(capabilitiesByAgentId.get(config.id)),
 			)
 			.map((config) => ({
 				id: config.id,
 				label: config.label,
-				disabled: !isAgentChoiceEnabled(capabilitiesByAgentId.get(config.id)),
 				// Prefer the user's icon override (built-in key or uploaded data
 				// URI); fall back to the preset-implied icon.
 				iconId: config.iconId ?? config.presetId,
 				presetId: config.presetId,
 			}));
-		const { ready, unavailable } = groupAgentsByAvailability(terminalAgents);
-		return [...ready, ...unavailable];
 	}, [capabilitiesByAgentId, isFetched, query.data]);
 
 	return {

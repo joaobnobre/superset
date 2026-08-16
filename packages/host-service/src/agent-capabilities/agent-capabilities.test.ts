@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { z } from "zod";
 import {
 	AgentCapabilityProbeAbortedError,
+	buildWindowsTreeKillArgs,
+	discoverCopilotModels,
 	inspectAgentCapability,
 	mapCopilotModels,
 	parseAntigravityModels,
@@ -16,11 +18,49 @@ import {
 	parsePiModels,
 	parsePiRpcModels,
 	runCommand,
+	runCopilotOperation,
 } from "./agent-capabilities";
 
 const nodeErrorSchema = z.object({ code: z.string() });
 
 describe("agent capabilities", () => {
+	test("builds a recursive forced Windows process-tree kill", () => {
+		expect(buildWindowsTreeKillArgs(1234)).toEqual([
+			"/pid",
+			"1234",
+			"/T",
+			"/F",
+		]);
+	});
+
+	test("passes the resolved Copilot runtime and configured args to the SDK", async () => {
+		let receivedRuntime:
+			| { executable: string; args: readonly string[] }
+			| undefined;
+		const client = {
+			start: async () => undefined,
+			getAuthStatus: async () => ({ isAuthenticated: true }),
+			listModels: async () => [],
+			stop: async () => undefined,
+			forceStop: async () => undefined,
+		};
+
+		await discoverCopilotModels(
+			{},
+			undefined,
+			{ executable: "/custom/copilot", args: ["--profile", "work"] },
+			(_env, runtime) => {
+				receivedRuntime = runtime;
+				return client;
+			},
+		);
+
+		expect(receivedRuntime).toEqual({
+			executable: "/custom/copilot",
+			args: ["--profile", "work"],
+		});
+	});
+
 	test("groups Antigravity effort variants without inventing unsupported levels", () => {
 		expect(
 			parseAntigravityModels(
@@ -514,6 +554,32 @@ describe("agent capabilities", () => {
 		}
 	});
 
+	test("uses the configured PATH and prefixes configured wrapper arguments", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "superset-agent-wrapper-"));
+		const executable = join(directory, "opencode-wrapper");
+		await writeFile(
+			executable,
+			'#!/bin/sh\n[ "$1" = "exec" ] || exit 41\n[ "$2" = "models" ] && printf "provider/model-1\\n"\n',
+		);
+		await chmod(executable, 0o755);
+		try {
+			const snapshot = await inspectAgentCapability({
+				id: "opencode-wrapper",
+				presetId: "opencode",
+				command: "opencode-wrapper",
+				args: ["exec"],
+				env: { PATH: directory },
+			});
+			expect(snapshot).toMatchObject({
+				status: "ready",
+				modelSource: "runtime",
+				models: [{ id: "provider/model-1", label: "Model 1" }],
+			});
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
 	test("cancels spawned CLI processes when the probe signal aborts", async () => {
 		const directory = await mkdtemp(join(tmpdir(), "superset-agent-cancel-"));
 		const executable = join(directory, "opencode-test");
@@ -552,6 +618,52 @@ describe("agent capabilities", () => {
 		} finally {
 			await rm(directory, { recursive: true, force: true });
 		}
+	});
+
+	test("force-stops an in-flight Copilot SDK operation on cancellation", async () => {
+		const controller = new AbortController();
+		let forceStops = 0;
+		const client = {
+			start: async () => {},
+			getAuthStatus: async () => ({ isAuthenticated: true }),
+			listModels: async () => [],
+			stop: async () => [],
+			forceStop: async () => {
+				forceStops += 1;
+			},
+		};
+		const operation = runCopilotOperation(
+			client,
+			() => new Promise<never>(() => {}),
+			controller.signal,
+		);
+		controller.abort();
+		await expect(operation).rejects.toBeInstanceOf(
+			AgentCapabilityProbeAbortedError,
+		);
+		expect(forceStops).toBe(1);
+	});
+
+	test("force-stops an in-flight Copilot SDK operation on timeout", async () => {
+		let forceStops = 0;
+		const client = {
+			start: async () => {},
+			getAuthStatus: async () => ({ isAuthenticated: true }),
+			listModels: async () => [],
+			stop: async () => [],
+			forceStop: async () => {
+				forceStops += 1;
+			},
+		};
+		await expect(
+			runCopilotOperation(
+				client,
+				() => new Promise<never>(() => {}),
+				undefined,
+				10,
+			),
+		).rejects.toThrow("Copilot model probe timed out");
+		expect(forceStops).toBe(1);
 	});
 
 	test("finishes Pi discovery as soon as its long-lived RPC returns models", async () => {

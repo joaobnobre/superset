@@ -69,8 +69,6 @@ function createCapabilityRefreshState(): CapabilityRefreshState {
 	};
 }
 
-let defaultRefreshState = createCapabilityRefreshState();
-
 function refreshKey(config: RevisionedAgentCapabilityConfig): string {
 	return `${config.id}:${config.configRevision}`;
 }
@@ -326,22 +324,6 @@ function refreshAgentCapabilityWithState(
 	return refresh;
 }
 
-export function refreshAgentCapability(
-	db: HostDb,
-	config: RevisionedAgentCapabilityConfig,
-	options: {
-		now?: number;
-		probe?: CapabilityProbe;
-	} = {},
-): Promise<AgentCapabilityView> {
-	return refreshAgentCapabilityWithState(
-		db,
-		config,
-		defaultRefreshState,
-		options,
-	);
-}
-
 async function refreshAgentCapabilitiesWithState(
 	db: HostDb,
 	configs: RevisionedAgentCapabilityConfig[],
@@ -403,23 +385,6 @@ async function refreshAgentCapabilitiesWithState(
 	return results;
 }
 
-export function refreshAgentCapabilities(
-	db: HostDb,
-	configs: RevisionedAgentCapabilityConfig[],
-	options: {
-		now?: number;
-		concurrency?: number;
-		probe?: CapabilityProbe;
-	} = {},
-): Promise<AgentCapabilityView[]> {
-	return refreshAgentCapabilitiesWithState(
-		db,
-		configs,
-		defaultRefreshState,
-		options,
-	);
-}
-
 export class CapabilityRefreshService {
 	readonly #state = createCapabilityRefreshState();
 
@@ -464,9 +429,4 @@ export class CapabilityRefreshService {
 		await Promise.allSettled(this.#state.refreshInFlight.values());
 		this.#state.refreshInFlight.clear();
 	}
-}
-
-export function clearCapabilityRefreshState(): void {
-	defaultRefreshState.abortController.abort();
-	defaultRefreshState = createCapabilityRefreshState();
 }

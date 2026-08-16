@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { LuCornerDownLeft, LuLoaderCircle } from "react-icons/lu";
 import { useTerminalAgentBindings } from "renderer/hooks/host-service/useTerminalAgentBindings";
 import { useWorkspaceHostUrl } from "renderer/hooks/host-service/useWorkspaceHostUrl";
-import { useV2AgentChoices } from "renderer/hooks/useV2AgentChoices";
+import { useV2AgentConfigs } from "renderer/hooks/useV2AgentConfigs";
 import { AgentPickerSelect } from "./components/AgentPickerSelect";
 import { AgentPlacementToggle } from "./components/AgentPlacementToggle";
 import {
@@ -45,11 +45,7 @@ export function AgentCommentComposer({
 	);
 
 	const hostUrl = useWorkspaceHostUrl(workspaceId);
-	const { agents } = useV2AgentChoices(hostUrl);
-	const configs = useMemo(
-		() => agents.filter((agent) => agent.id !== "superset"),
-		[agents],
-	);
+	const { data: configs = [] } = useV2AgentConfigs(hostUrl);
 
 	const { value, placement, resolved, onValueChange, onPlacementChange } =
 		useDiffCommentTarget({ sessions, configs });

@@ -1,20 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import type { AppRouter } from "@superset/host-service";
 import { QueryClient } from "@tanstack/react-query";
-import { TRPCClientError } from "@trpc/client";
 import {
 	V2_AGENT_CONFIGS_QUERY_KEY,
 	V2_AGENT_CONFIGS_SESSION_QUERY_POLICY,
 } from "renderer/hooks/useV2AgentConfigs";
 import {
 	getCapabilityDisplayInventory,
-	isAgentChoiceEnabled,
 	isAgentChoiceVisible,
 } from "./agentChoiceAvailability";
-import {
-	getAgentLaunchCapabilityError,
-	invalidateCapabilitiesOnLaunchError,
-} from "./agentLaunchCapabilityError";
 import {
 	HOST_AGENT_CAPABILITY_REFRESH_QUERY_KEY,
 	HOST_AGENT_CAPABILITY_SNAPSHOT_QUERY_KEY,
@@ -28,9 +21,7 @@ import {
 } from "./invalidateHostAgentQueries";
 import {
 	type AgentChoiceCapability,
-	groupAgentsByAvailability,
 	publishCapabilityRefresh,
-	resolveAgentChoicesFetched,
 } from "./useV2AgentChoices";
 
 function capability(
@@ -71,45 +62,6 @@ function runtimeInventory(
 		inventoryCheckedAt: "2026-01-01T00:00:00.000Z",
 	};
 }
-
-function launchCapabilityError(
-	kind: "authentication_required" | "retired_model",
-) {
-	return new TRPCClientError<AppRouter>("launch failed", {
-		result: {
-			error: {
-				message: "launch failed",
-				code: -32001,
-				data: {
-					code: "PRECONDITION_FAILED",
-					httpStatus: 412,
-					path: "agents.run",
-					teardownFailure: undefined,
-					projectNotSetup: undefined,
-					deleteInProgress: undefined,
-					agentLaunchCapability: { kind },
-				},
-			},
-		},
-	});
-}
-
-describe("groupAgentsByAvailability", () => {
-	test("keeps manual order within ready and unavailable groups", () => {
-		const result = groupAgentsByAvailability([
-			{ id: "codex", label: "Codex" },
-			{ id: "gemini", label: "Gemini", disabled: true },
-			{ id: "claude", label: "Claude" },
-			{ id: "amp", label: "Amp", disabled: true },
-		]);
-
-		expect(result.ready.map((agent) => agent.id)).toEqual(["codex", "claude"]);
-		expect(result.unavailable.map((agent) => agent.id)).toEqual([
-			"gemini",
-			"amp",
-		]);
-	});
-});
 
 describe("capability query keys", () => {
 	test("export host-scoped snapshot and refresh families", () => {
@@ -195,53 +147,6 @@ describe("agent config session policy", () => {
 	});
 });
 
-describe("resolveAgentChoicesFetched", () => {
-	test("cold run with zero snapshots stays loading until refresh settles", () => {
-		expect(
-			resolveAgentChoicesFetched({
-				configsFetched: true,
-				snapshotsFetched: true,
-				snapshotCount: 0,
-				refreshEnabled: true,
-				refreshSettled: false,
-			}),
-		).toBe(false);
-		expect(
-			resolveAgentChoicesFetched({
-				configsFetched: true,
-				snapshotsFetched: true,
-				snapshotCount: 0,
-				refreshEnabled: true,
-				refreshSettled: true,
-			}),
-		).toBe(true);
-	});
-
-	test("cached rows are ready while refresh is still pending", () => {
-		expect(
-			resolveAgentChoicesFetched({
-				configsFetched: true,
-				snapshotsFetched: true,
-				snapshotCount: 2,
-				refreshEnabled: true,
-				refreshSettled: false,
-			}),
-		).toBe(true);
-	});
-
-	test("closed snapshot-only reads do not wait for refresh", () => {
-		expect(
-			resolveAgentChoicesFetched({
-				configsFetched: true,
-				snapshotsFetched: true,
-				snapshotCount: 0,
-				refreshEnabled: false,
-				refreshSettled: false,
-			}),
-		).toBe(true);
-	});
-});
-
 describe("publishCapabilityRefresh", () => {
 	test("prevents an older snapshot response from replacing refreshed data", async () => {
 		const queryClient = new QueryClient();
@@ -322,7 +227,6 @@ describe("nested AgentChoiceCapability DTO", () => {
 		});
 		expect(view.health.installed).toBeNull();
 		expect(isAgentChoiceVisible(view)).toBe(true);
-		expect(isAgentChoiceEnabled(view)).toBe(false);
 	});
 });
 
@@ -340,7 +244,6 @@ describe("agent choice availability", () => {
 			},
 		});
 		expect(isAgentChoiceVisible(view)).toBe(true);
-		expect(isAgentChoiceEnabled(view)).toBe(true);
 	});
 
 	test("installed:false missing executable is hidden and drops inventory", () => {
@@ -363,11 +266,10 @@ describe("agent choice availability", () => {
 			},
 		});
 		expect(isAgentChoiceVisible(view)).toBe(false);
-		expect(isAgentChoiceEnabled(view)).toBe(false);
 		expect(getCapabilityDisplayInventory(view)).toBeNull();
 	});
 
-	test("installed:null is unknown: visible and disabled", () => {
+	test("installed:null is unknown but usable", () => {
 		const view = capability({
 			agentId: "codex",
 			inventory: runtimeInventory("codex", [
@@ -387,11 +289,10 @@ describe("agent choice availability", () => {
 			},
 		});
 		expect(isAgentChoiceVisible(view)).toBe(true);
-		expect(isAgentChoiceEnabled(view)).toBe(false);
 		expect(getCapabilityDisplayInventory(view)?.models).toHaveLength(1);
 	});
 
-	test("unauthenticated installed agents stay visible but disabled", () => {
+	test("authentication diagnostics do not disable installed agents", () => {
 		const view = capability({
 			agentId: "codex",
 			health: {
@@ -404,18 +305,20 @@ describe("agent choice availability", () => {
 			},
 		});
 		expect(isAgentChoiceVisible(view)).toBe(true);
-		expect(isAgentChoiceEnabled(view)).toBe(false);
 	});
 });
 
 describe("mutation invalidation classification", () => {
-	const current = { command: "codex", env: { FOO: "1" } };
+	const current = { command: "codex", args: ["exec"], env: { FOO: "1" } };
 
-	test("command or env updates invalidate capabilities", () => {
+	test("command, args, or env updates invalidate capabilities", () => {
 		expect(isDiscoveryChangingAgentPatch(current, { command: "claude" })).toBe(
 			true,
 		);
 		expect(isDiscoveryChangingAgentPatch(current, { env: { FOO: "2" } })).toBe(
+			true,
+		);
+		expect(isDiscoveryChangingAgentPatch(current, { args: ["run"] })).toBe(
 			true,
 		);
 		expect(
@@ -428,6 +331,9 @@ describe("mutation invalidation classification", () => {
 			false,
 		);
 		expect(isDiscoveryChangingAgentPatch(current, { env: { FOO: "1" } })).toBe(
+			false,
+		);
+		expect(isDiscoveryChangingAgentPatch(current, { args: ["exec"] })).toBe(
 			false,
 		);
 		expect(classifyHostAgentUpdateInvalidation(current, {})).toBe("config");
@@ -452,59 +358,6 @@ describe("mutation invalidation classification", () => {
 		).toBe(false);
 		expect(
 			queryClient.getQueryState(hostAgentCapabilityRefreshQueryKey(hostUrl))
-				?.isInvalidated,
-		).toBe(false);
-	});
-});
-
-describe("typed launch-error invalidation", () => {
-	test("reads agentLaunchCapability from TRPC error data", () => {
-		const error = launchCapabilityError("authentication_required");
-		expect(getAgentLaunchCapabilityError(error)).toEqual({
-			kind: "authentication_required",
-		});
-		expect(
-			getAgentLaunchCapabilityError(new Error("auth required")),
-		).toBeNull();
-		expect(
-			getAgentLaunchCapabilityError(new TRPCClientError("plain")),
-		).toBeNull();
-	});
-
-	test("invalidates only the selected host snapshot", () => {
-		const queryClient = new QueryClient();
-		const hostA = "http://host-a";
-		const hostB = "http://host-b";
-		queryClient.setQueryData(hostAgentCapabilitySnapshotQueryKey(hostA), []);
-		queryClient.setQueryData(hostAgentCapabilityRefreshQueryKey(hostA), []);
-		queryClient.setQueryData(hostAgentCapabilitySnapshotQueryKey(hostB), []);
-		queryClient.setQueryData(hostAgentCapabilityRefreshQueryKey(hostB), []);
-
-		expect(
-			invalidateCapabilitiesOnLaunchError(
-				queryClient,
-				hostA,
-				launchCapabilityError("retired_model"),
-			),
-		).toBe(true);
-		expect(
-			invalidateCapabilitiesOnLaunchError(
-				queryClient,
-				hostA,
-				new Error("retired model"),
-			),
-		).toBe(false);
-
-		expect(
-			queryClient.getQueryState(hostAgentCapabilitySnapshotQueryKey(hostA))
-				?.isInvalidated,
-		).toBe(true);
-		expect(
-			queryClient.getQueryState(hostAgentCapabilityRefreshQueryKey(hostA))
-				?.isInvalidated,
-		).toBe(false);
-		expect(
-			queryClient.getQueryState(hostAgentCapabilitySnapshotQueryKey(hostB))
 				?.isInvalidated,
 		).toBe(false);
 	});

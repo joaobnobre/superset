@@ -2,7 +2,11 @@ import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { CopilotClient, type ModelInfo } from "@github/copilot-sdk";
+import {
+	CopilotClient,
+	type ModelInfo,
+	RuntimeConnection,
+} from "@github/copilot-sdk";
 import {
 	collectProcessTree,
 	readProcessTableAsync,
@@ -64,6 +68,7 @@ export interface AgentCapabilityConfig {
 	id: string;
 	presetId: string;
 	command: string;
+	args?: string[];
 	env: Record<string, string>;
 	configRevision?: number;
 }
@@ -73,6 +78,37 @@ interface CommandResult {
 	stdout: string;
 	stderr: string;
 	timedOut: boolean;
+}
+
+export function buildWindowsTreeKillArgs(pid: number): string[] {
+	return ["/pid", String(pid), "/T", "/F"];
+}
+
+async function killWindowsProcessTree(pid: number): Promise<void> {
+	await new Promise<void>((resolve) => {
+		const killer = spawn("taskkill", buildWindowsTreeKillArgs(pid), {
+			stdio: "ignore",
+			windowsHide: true,
+		});
+		let settled = false;
+		const finish = () => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve();
+		};
+		const timer = setTimeout(() => {
+			try {
+				killer.kill();
+			} catch {
+				// Already gone.
+			}
+			finish();
+		}, PROBE_KILL_SAFETY_MS);
+		timer.unref?.();
+		killer.once("error", finish);
+		killer.once("close", finish);
+	});
 }
 
 function classifyCommandFailure(
@@ -231,6 +267,7 @@ export function runCommand(
 			if (rootPid) knownPids.add(rootPid);
 
 			if (process.platform === "win32") {
+				if (rootPid) await killWindowsProcessTree(rootPid);
 				try {
 					child.kill();
 				} catch {
@@ -369,19 +406,17 @@ async function createProbeEnvironment(configEnv: Record<string, string>) {
 	}
 	const probeEnv = {
 		...baseEnv,
-		// The login-shell snapshot can inherit temporary Codex/npm shims that
-		// make OpenCode spend tens of seconds initializing plugins. The host's
-		// PATH has already been assembled for this machine and resolves the same
-		// user CLI without those transient prefixes.
+		// Explicit agent configuration wins over the login-shell snapshot, so a
+		// wrapper manager such as mise or npx is resolved exactly as configured.
 		...configEnv,
 	};
-	if (process.env.PATH) probeEnv.PATH = process.env.PATH;
 	return probeEnv;
 }
 
 async function probeAuthentication(
 	presetId: string,
 	executable: string,
+	commandArgs: string[],
 	env: NodeJS.ProcessEnv,
 	signal?: AbortSignal,
 ): Promise<AgentCapabilitySnapshot["auth"]> {
@@ -403,7 +438,7 @@ async function probeAuthentication(
 	if (!args) return "unknown";
 	const result = await runCommand(
 		executable,
-		args,
+		[...commandArgs, ...args],
 		env,
 		PROBE_TIMEOUT_MS,
 		undefined,
@@ -794,39 +829,128 @@ function copilotModelReasoning(
 	return reasoning;
 }
 
-async function discoverCopilotModels(env: NodeJS.ProcessEnv): Promise<{
+class CopilotProbeTimeoutError extends Error {
+	constructor() {
+		super("Copilot model probe timed out");
+	}
+}
+
+interface CopilotProbeClient {
+	start(): Promise<void>;
+	getAuthStatus(): Promise<{ isAuthenticated: boolean }>;
+	listModels(): Promise<ModelInfo[]>;
+	stop(): Promise<unknown>;
+	forceStop(): Promise<unknown>;
+}
+
+function stopCopilotClient(client: CopilotProbeClient): void {
+	void client
+		.stop()
+		.catch(() => client.forceStop())
+		.catch(() => undefined);
+}
+
+export async function runCopilotOperation<T>(
+	client: CopilotProbeClient,
+	operation: () => Promise<T>,
+	signal?: AbortSignal,
+	timeoutMs = PROBE_TIMEOUT_MS,
+): Promise<T> {
+	if (signal?.aborted) {
+		void client.forceStop().catch(() => undefined);
+		throw new AgentCapabilityProbeAbortedError();
+	}
+	return new Promise<T>((resolve, reject) => {
+		let settled = false;
+		const finish = (callback: () => void) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			signal?.removeEventListener("abort", abort);
+			callback();
+		};
+		const abort = () =>
+			finish(() => {
+				void client.forceStop().catch(() => undefined);
+				reject(new AgentCapabilityProbeAbortedError());
+			});
+		const timeout = setTimeout(
+			() =>
+				finish(() => {
+					void client.forceStop().catch(() => undefined);
+					reject(new CopilotProbeTimeoutError());
+				}),
+			timeoutMs,
+		);
+		signal?.addEventListener("abort", abort, { once: true });
+		void operation().then(
+			(value) => finish(() => resolve(value)),
+			(error: unknown) => finish(() => reject(error)),
+		);
+	});
+}
+
+export async function discoverCopilotModels(
+	env: NodeJS.ProcessEnv,
+	signal?: AbortSignal,
+	runtime?: { executable: string; args: readonly string[] },
+	clientFactory: (
+		env: NodeJS.ProcessEnv,
+		runtime?: { executable: string; args: readonly string[] },
+	) => CopilotProbeClient = (clientEnv, configuredRuntime) =>
+		new CopilotClient({
+			connection: configuredRuntime
+				? RuntimeConnection.forStdio({
+						path: configuredRuntime.executable,
+						args: configuredRuntime.args,
+					})
+				: undefined,
+			env: clientEnv,
+			logLevel: "none",
+		}),
+): Promise<{
 	models: AgentCapabilityModel[];
 	auth: AgentCapabilitySnapshot["auth"];
 	message: string | null;
 	errorKind: AgentCapabilityErrorKind | null;
 }> {
-	const client = new CopilotClient({ env, logLevel: "none" });
+	const client = clientFactory(env, runtime);
 	try {
-		await client.start();
-		const auth = await client.getAuthStatus();
-		if (!auth.isAuthenticated) {
-			return {
-				models: [],
-				auth: "unauthenticated",
-				message: "Authentication required",
-				errorKind: null,
-			};
-		}
-		return {
-			models: mapCopilotModels(await client.listModels()),
-			auth: "authenticated",
-			message: null,
-			errorKind: null,
-		};
-	} catch {
+		return await runCopilotOperation(
+			client,
+			async () => {
+				await client.start();
+				const auth = await client.getAuthStatus();
+				if (!auth.isAuthenticated) {
+					return {
+						models: [],
+						auth: "unauthenticated" as const,
+						message: "Authentication required",
+						errorKind: null,
+					};
+				}
+				return {
+					models: mapCopilotModels(await client.listModels()),
+					auth: "authenticated" as const,
+					message: null,
+					errorKind: null,
+				};
+			},
+			signal,
+		);
+	} catch (error) {
+		if (error instanceof AgentCapabilityProbeAbortedError) throw error;
 		return {
 			models: [],
 			auth: "unknown",
 			message: "Could not query models from the Copilot runtime",
-			errorKind: "process_failure",
+			errorKind:
+				error instanceof CopilotProbeTimeoutError
+					? "timeout"
+					: "process_failure",
 		};
 	} finally {
-		await client.stop().catch(() => client.forceStop());
+		stopCopilotClient(client);
 	}
 }
 
@@ -932,6 +1056,10 @@ function mergeAuthenticationObservations(
 	return "unknown";
 }
 
+function probeArgs(config: AgentCapabilityConfig, args: string[]): string[] {
+	return [...(config.args ?? []), ...args];
+}
+
 function capabilityStatusForAuth(
 	auth: AgentCapabilitySnapshot["auth"],
 	presetId: string,
@@ -959,7 +1087,7 @@ async function discoverModels(
 	if (config.presetId === "antigravity") {
 		const result = await runCommand(
 			executable,
-			["models"],
+			probeArgs(config, ["models"]),
 			env,
 			PROBE_TIMEOUT_MS,
 			undefined,
@@ -1000,7 +1128,10 @@ async function discoverModels(
 	}
 
 	if (config.presetId === "copilot") {
-		const discovery = await discoverCopilotModels(env);
+		const discovery = await discoverCopilotModels(env, signal, {
+			executable,
+			args: config.args ?? [],
+		});
 		return {
 			...discovery,
 			source: discovery.models.length > 0 ? "runtime" : "none",
@@ -1034,7 +1165,7 @@ async function discoverModels(
 			// Extensions are useful in interactive sessions but can initialize
 			// arbitrary user code before the RPC server begins accepting requests.
 			// Discovery only needs Pi's configured model registry.
-			["--mode", "rpc", "--no-session", "--no-extensions"],
+			probeArgs(config, ["--mode", "rpc", "--no-session", "--no-extensions"]),
 			env,
 			PROBE_TIMEOUT_MS,
 			'{"type":"get_available_models"}\n',
@@ -1045,7 +1176,7 @@ async function discoverModels(
 		if (!result.timedOut && (result.exitCode !== 0 || models.length === 0)) {
 			result = await runCommand(
 				executable,
-				["--list-models"],
+				probeArgs(config, ["--list-models"]),
 				env,
 				PROBE_TIMEOUT_MS,
 				undefined,
@@ -1075,7 +1206,7 @@ async function discoverModels(
 	if (config.presetId === "grok") {
 		const result = await runCommand(
 			executable,
-			["models"],
+			probeArgs(config, ["models"]),
 			env,
 			PROBE_TIMEOUT_MS,
 			undefined,
@@ -1114,7 +1245,7 @@ async function discoverModels(
 	if (config.presetId === "kimi") {
 		const result = await runCommand(
 			executable,
-			["provider", "list", "--json"],
+			probeArgs(config, ["provider", "list", "--json"]),
 			env,
 			PROBE_TIMEOUT_MS,
 			undefined,
@@ -1150,11 +1281,13 @@ async function discoverModels(
 	}
 
 	if (config.presetId === "opencode" || config.presetId === "cursor-agent") {
-		const args =
+		const args = probeArgs(
+			config,
 			config.presetId === "opencode"
 				? ["models", "--verbose"]
-				: ["--list-models"];
-		let result = await runCommand(
+				: ["--list-models"],
+		);
+		const result = await runCommand(
 			executable,
 			args,
 			env,
@@ -1163,25 +1296,10 @@ async function discoverModels(
 			undefined,
 			signal,
 		);
-		let models =
+		const models =
 			config.presetId === "opencode"
 				? parseOpenCodeModels(result.stdout)
 				: parseLineModels(result.stdout);
-		if (
-			config.presetId === "opencode" &&
-			(result.exitCode !== 0 || models.length === 0)
-		) {
-			result = await runCommand(
-				executable,
-				args,
-				env,
-				PROBE_TIMEOUT_MS,
-				undefined,
-				undefined,
-				signal,
-			);
-			models = parseOpenCodeModels(result.stdout);
-		}
 		const output = `${result.stdout}\n${result.stderr}`;
 		if (/authentication required|not authenticated|run .*login/i.test(output)) {
 			return {
@@ -1243,35 +1361,16 @@ async function probeAgentCapability(
 	}
 	const executable = resolvedExecutable.path;
 
-	const shouldProbeVersion = new Set([
-		"antigravity",
-		"claude",
-		"codex",
-		"grok",
-		"opencode",
-		"cursor-agent",
-	]).has(config.presetId);
-	const [versionResult, discovery, probedAuth] = await Promise.all([
-		shouldProbeVersion
-			? runCommand(
-					executable,
-					["--version"],
-					env,
-					PROBE_TIMEOUT_MS,
-					undefined,
-					undefined,
-					signal,
-				)
-			: Promise.resolve({
-					exitCode: null,
-					stdout: "",
-					stderr: "",
-					timedOut: false,
-				}),
+	const [discovery, probedAuth] = await Promise.all([
 		discoverModels(config, executable, env, signal),
-		probeAuthentication(config.presetId, executable, env, signal),
+		probeAuthentication(
+			config.presetId,
+			executable,
+			config.args ?? [],
+			env,
+			signal,
+		),
 	]);
-	const versionLine = versionResult.stdout.trim().split(/\r?\n/)[0] || null;
 	const auth = mergeAuthenticationObservations(discovery.auth, probedAuth);
 	const status = capabilityStatusForAuth(auth, config.presetId);
 	const snapshot: AgentCapabilitySnapshot = {
@@ -1280,7 +1379,7 @@ async function probeAgentCapability(
 		status,
 		installed: true,
 		auth,
-		version: versionLine,
+		version: null,
 		modelSource: discovery.source,
 		models: discovery.models,
 		message: discovery.message,

@@ -67,9 +67,6 @@ describe("workspaces launch contract", () => {
 			throw new Error("Expected create to fail");
 		} catch (error) {
 			expect(error).toBeInstanceOf(TRPCError);
-			expect((error as TRPCError).cause).toMatchObject({
-				kind: "retired_model",
-			});
 		}
 		expect(db.select().from(schema.workspaces).all()).toEqual([]);
 	});
@@ -93,9 +90,6 @@ describe("workspaces launch contract", () => {
 			throw new Error("Expected createEnqueued to fail");
 		} catch (error) {
 			expect(error).toBeInstanceOf(TRPCError);
-			expect((error as TRPCError).cause).toMatchObject({
-				kind: "retired_model",
-			});
 		}
 		expect(db.select().from(schema.workspaces).all()).toEqual([]);
 	});

@@ -13,17 +13,6 @@ import {
 // Radix Select reserves "" for clearing, so "Default" needs a sentinel.
 const DEFAULT_MODEL_VALUE = "__default_model__";
 
-function resolveSelectedValue(
-	models: AgentModelOption[],
-	value: string | null,
-	includeDefault: boolean,
-): string | undefined {
-	if (value !== null && models.some((model) => model.id === value))
-		return value;
-	if (includeDefault) return DEFAULT_MODEL_VALUE;
-	return models[0]?.id;
-}
-
 interface AgentModelSelectProps {
 	models: AgentModelOption[];
 	value: string | null;
@@ -31,7 +20,6 @@ interface AgentModelSelectProps {
 	disabled?: boolean;
 	triggerClassName?: string;
 	contentClassName?: string;
-	includeDefault?: boolean;
 }
 
 export function AgentModelSelect({
@@ -41,9 +29,11 @@ export function AgentModelSelect({
 	disabled,
 	triggerClassName,
 	contentClassName,
-	includeDefault = true,
 }: AgentModelSelectProps) {
-	const selectedValue = resolveSelectedValue(models, value, includeDefault);
+	const selectedValue =
+		value !== null && models.some((model) => model.id === value)
+			? value
+			: DEFAULT_MODEL_VALUE;
 	const hasProviderGroups = models.some((model) => model.provider);
 	const providerGroups = Map.groupBy(
 		models,
@@ -64,9 +54,7 @@ export function AgentModelSelect({
 				<SelectValue placeholder="Default" />
 			</SelectTrigger>
 			<SelectContent className={contentClassName}>
-				{includeDefault && (
-					<SelectItem value={DEFAULT_MODEL_VALUE}>Default</SelectItem>
-				)}
+				<SelectItem value={DEFAULT_MODEL_VALUE}>Default</SelectItem>
 				{hasProviderGroups
 					? Array.from(providerGroups.entries()).map(
 							([provider, providerModels], index) => (

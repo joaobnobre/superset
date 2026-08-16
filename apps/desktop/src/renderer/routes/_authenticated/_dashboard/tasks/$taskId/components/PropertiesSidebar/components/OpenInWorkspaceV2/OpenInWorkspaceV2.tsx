@@ -86,10 +86,7 @@ export function OpenInWorkspaceV2({ task }: OpenInWorkspaceV2Props) {
 	const { agents: v2Agents, isFetched: v2AgentsFetched } =
 		useV2AgentChoices(launchHostUrl);
 	const validAgentIds = useMemo(
-		() =>
-			new Set(
-				v2Agents.filter((agent) => !agent.disabled).map((agent) => agent.id),
-			),
+		() => new Set(v2Agents.map((agent) => agent.id)),
 		[v2Agents],
 	);
 

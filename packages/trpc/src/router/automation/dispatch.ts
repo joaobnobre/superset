@@ -9,9 +9,13 @@ import {
 	v2UsersHosts,
 } from "@superset/db/schema";
 import { buildHostRoutingKey } from "@superset/shared/host-routing";
+import {
+	deduplicateBranchName,
+	sanitizeBranchNameWithMaxLength,
+	slugifyForBranch,
+} from "@superset/shared/workspace-launch";
 import { and, eq, sql } from "drizzle-orm";
 import { fetchRelayPresence } from "../../lib/relay-presence";
-import { createFreshAutomationWorkspace as createFreshAutomationWorkspaceOnHost } from "./dispatch-fresh-workspace";
 import { RelayDispatchError, relayMutation } from "./relay-client";
 
 type AgentRunResult = { kind: "terminal"; sessionId: string; label: string };
@@ -117,15 +121,15 @@ export async function dispatchAutomation(
 		);
 
 		const createFreshWorkspace = async () => {
-			const created = await createFreshAutomationWorkspaceOnHost({
+			const created = await createWorkspaceOnHost({
 				relayUrl,
 				hostId: routingKey,
 				jwt,
 				projectId: automation.v2ProjectId,
 				automation,
-				mutate: relayMutation,
+				runId: run.id,
 			});
-			return created;
+			return created.workspaceId;
 		};
 
 		const runAgent = (targetWorkspaceId: string) =>
@@ -138,21 +142,11 @@ export async function dispatchAutomation(
 				prompt: automation.prompt,
 			});
 
-		let launchedAgent: AgentRunResult | null = null;
-		if (automation.v2WorkspaceId) {
-			workspaceId = automation.v2WorkspaceId;
-		} else {
-			const created = await createFreshWorkspace();
-			workspaceId = created.workspaceId;
-			launchedAgent = created.launchedAgent;
-		}
-		if (!workspaceId) {
-			throw new Error("workspace id missing after create");
-		}
+		workspaceId = automation.v2WorkspaceId ?? (await createFreshWorkspace());
 
 		let result: AgentRunResult;
 		try {
-			result = launchedAgent ?? (await runAgent(workspaceId));
+			result = await runAgent(workspaceId);
 		} catch (err) {
 			// Fall back only when the host says the pinned workspace is gone:
 			// tRPC NOT_FOUND (404) naming the pinned id. Other NOT_FOUNDs
@@ -178,10 +172,8 @@ export async function dispatchAutomation(
 				);
 			// Don't let the outer catch record the dead id if fresh-create throws.
 			workspaceId = null;
-			launchedAgent = null;
-			const created = await createFreshWorkspace();
-			workspaceId = created.workspaceId;
-			result = created.launchedAgent ?? (await runAgent(workspaceId));
+			workspaceId = await createFreshWorkspace();
+			result = await runAgent(workspaceId);
 		}
 
 		await dbWs
@@ -312,6 +304,82 @@ async function recordSkipped(
 		})
 		.returning({ id: automationRuns.id });
 	return row;
+}
+
+async function createWorkspaceOnHost(args: {
+	relayUrl: string;
+	hostId: string;
+	jwt: string;
+	projectId: string | null;
+	automation: DispatchableAutomation;
+	runId: string;
+}): Promise<{ workspaceId: string }> {
+	// Session automation: no project, no branch. The host allocates a managed
+	// folder under ~/.superset/sessions and dedupes the name per run.
+	if (args.projectId === null) {
+		const result = await relayMutation<
+			{ name: string },
+			{ workspace: { id: string } }
+		>(
+			{
+				relayUrl: args.relayUrl,
+				hostId: args.hostId,
+				jwt: args.jwt,
+				timeoutMs: 90_000,
+			},
+			"workspaces.createSession",
+			{ name: args.automation.name.slice(0, 100) },
+		);
+		return { workspaceId: result.workspace.id };
+	}
+
+	// Full-precision timestamp keeps branch names readable AND collision-free
+	// for anything coarser than 1 second.
+	// e.g. "2026-04-19-17-30-00"
+	const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-");
+	const baseSlug = slugifyForBranch(args.automation.name, 30);
+	const candidateBranch = sanitizeBranchNameWithMaxLength(
+		baseSlug ? `${baseSlug}-${timestamp}` : `automation-${timestamp}`,
+		60,
+	);
+	const branchName = deduplicateBranchName(candidateBranch, []);
+	const workspaceName = args.automation.name.slice(0, 100);
+
+	const result = await relayMutation<
+		{
+			projectId: string;
+			name: string;
+			branch: string;
+		},
+		{
+			workspace: {
+				id: string;
+				projectId: string;
+				name: string;
+				branch: string;
+			};
+			terminals: Array<{ terminalId: string; label?: string }>;
+			agents: Array<unknown>;
+			alreadyExists: boolean;
+		}
+	>(
+		{
+			relayUrl: args.relayUrl,
+			hostId: args.hostId,
+			jwt: args.jwt,
+			// Workspace creation does git clone + worktree setup — bigger repos
+			// can comfortably take >25s. Give it real room.
+			timeoutMs: 90_000,
+		},
+		"workspaces.create",
+		{
+			projectId: args.projectId,
+			name: workspaceName,
+			branch: branchName,
+		},
+	);
+
+	return { workspaceId: result.workspace.id };
 }
 
 async function runAgentOnHost(args: {

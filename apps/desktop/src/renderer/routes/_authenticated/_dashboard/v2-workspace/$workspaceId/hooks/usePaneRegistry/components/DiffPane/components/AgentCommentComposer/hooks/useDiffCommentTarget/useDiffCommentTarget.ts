@@ -1,3 +1,4 @@
+import type { HostAgentConfig } from "@superset/host-service/settings";
 import { useCallback, useMemo, useState } from "react";
 import type { TerminalAgentBinding } from "renderer/hooks/host-service/useTerminalAgentBindings";
 
@@ -21,12 +22,12 @@ const LAST_PLACEMENT_KEY = "lastSelectedDiffCommentPlacement";
 const DEFAULT_PLACEMENT: AgentSessionPlacement = "split-pane";
 
 function readStorage(key: string): string | null {
-	if (!globalThis.window) return null;
+	if (typeof window === "undefined") return null;
 	return window.localStorage.getItem(key);
 }
 
-function writeStorage(key: string, value: string): void {
-	if (!globalThis.window) return;
+function writeStorage(key: string, value: string) {
+	if (typeof window === "undefined") return;
 	window.localStorage.setItem(key, value);
 }
 
@@ -40,67 +41,9 @@ export function decodeSelection(value: string): DecodedSelection | null {
 	return null;
 }
 
-export function getEnabledDiffCommentAgents(
-	configs: readonly DiffCommentAgentChoice[],
-): DiffCommentAgentChoice[] {
-	return configs.filter((config) => !config.disabled);
-}
-
-export function resolveDiffCommentDefaultValue({
-	sessions,
-	configs,
-}: {
-	sessions: ReadonlyArray<{ terminalId: string }>;
-	configs: readonly DiffCommentAgentChoice[];
-}): string | null {
-	if (sessions.length > 0) {
-		const stored = readStorage(LAST_TERMINAL_ID_KEY);
-		const alive =
-			stored && sessions.some((session) => session.terminalId === stored)
-				? stored
-				: sessions[0]?.terminalId;
-		if (alive) return `${EXISTING_PREFIX}${alive}`;
-	}
-	const enabledConfigs = getEnabledDiffCommentAgents(configs);
-	if (enabledConfigs.length === 0) return null;
-	const storedConfigId = readStorage(LAST_NEW_AGENT_CONFIG_ID_KEY);
-	const fromStorage =
-		storedConfigId &&
-		enabledConfigs.some((config) => config.id === storedConfigId)
-			? storedConfigId
-			: enabledConfigs[0]?.id;
-	return fromStorage ? `${NEW_PREFIX}${fromStorage}` : null;
-}
-
-export function isDiffCommentSelectionValid({
-	value,
-	sessions,
-	configs,
-}: {
-	value: string;
-	sessions: ReadonlyArray<{ terminalId: string }>;
-	configs: readonly DiffCommentAgentChoice[];
-}): boolean {
-	const decoded = decodeSelection(value);
-	if (!decoded) return false;
-	if (decoded.kind === "existing") {
-		return sessions.some((session) => session.terminalId === decoded.id);
-	}
-	return getEnabledDiffCommentAgents(configs).some(
-		(config) => config.id === decoded.id,
-	);
-}
-
-export interface DiffCommentAgentChoice {
-	id: string;
-	label: string;
-	presetId?: string;
-	disabled?: boolean;
-}
-
 interface UseDiffCommentTargetArgs {
 	sessions: TerminalAgentBinding[];
-	configs: DiffCommentAgentChoice[];
+	configs: HostAgentConfig[];
 }
 
 interface UseDiffCommentTargetResult {
@@ -123,8 +66,8 @@ interface UseDiffCommentTargetResult {
  * Priority for the default selection:
  *   1. last picked terminal session, if still alive
  *   2. most recent active session
- *   3. last picked new-agent config, if still enabled
- *   4. first enabled config
+ *   3. last picked new-agent config, if still listed
+ *   4. first config
  */
 export function useDiffCommentTarget({
 	sessions,
@@ -138,21 +81,34 @@ export function useDiffCommentTarget({
 			: DEFAULT_PLACEMENT;
 	});
 
-	const computedDefault = useMemo(
-		() => resolveDiffCommentDefaultValue({ sessions, configs }),
-		[sessions, configs],
-	);
+	const computedDefault = useMemo<string | null>(() => {
+		if (sessions.length > 0) {
+			const stored = readStorage(LAST_TERMINAL_ID_KEY);
+			const alive =
+				stored && sessions.some((s) => s.terminalId === stored)
+					? stored
+					: sessions[0]?.terminalId;
+			if (alive) return `${EXISTING_PREFIX}${alive}`;
+		}
+		if (configs.length === 0) return null;
+		const storedConfigId = readStorage(LAST_NEW_AGENT_CONFIG_ID_KEY);
+		const fromStorage =
+			storedConfigId && configs.some((c) => c.id === storedConfigId)
+				? storedConfigId
+				: configs[0]?.id;
+		return fromStorage ? `${NEW_PREFIX}${fromStorage}` : null;
+	}, [sessions, configs]);
 
 	// Validate the user's override against current data — if their pick is
-	// now gone (terminal died, config deleted) or a new-agent choice is
-	// disabled, fall back to the default. Live sessions stay usable.
+	// now gone (terminal died, config deleted), fall back to the default.
 	const overrideIsValid = useMemo(() => {
 		if (!override) return false;
-		return isDiffCommentSelectionValid({
-			value: override,
-			sessions,
-			configs,
-		});
+		const decoded = decodeSelection(override);
+		if (!decoded) return false;
+		if (decoded.kind === "existing") {
+			return sessions.some((s) => s.terminalId === decoded.id);
+		}
+		return configs.some((c) => c.id === decoded.id);
 	}, [override, sessions, configs]);
 
 	const value = overrideIsValid ? override : computedDefault;

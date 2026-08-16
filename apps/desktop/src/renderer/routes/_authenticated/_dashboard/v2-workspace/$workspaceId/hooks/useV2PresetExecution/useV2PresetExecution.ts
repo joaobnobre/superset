@@ -3,14 +3,12 @@ import { toast } from "@superset/ui/sonner";
 import { workspaceTrpc } from "@superset/workspace-client";
 import { useLiveQuery } from "@tanstack/react-db";
 import { useCallback, useMemo } from "react";
-import { invalidateCapabilitiesOnLaunchError } from "renderer/hooks/useV2AgentChoices";
 import { useV2AgentConfigs } from "renderer/hooks/useV2AgentConfigs";
 import { resolvePresetLaunchCommands } from "renderer/lib/agent-launch-command";
 import {
 	buildTerminalCommand,
 	normalizeTerminalCommand,
 } from "renderer/lib/terminal/launch-command";
-import { electronQueryClient } from "renderer/providers/ElectronTRPCProvider";
 import { useWorkspace } from "renderer/routes/_authenticated/_dashboard/v2-workspace/providers/WorkspaceProvider";
 import { useCollections } from "renderer/routes/_authenticated/providers/CollectionsProvider";
 import type { V2TerminalPresetRow } from "renderer/routes/_authenticated/providers/CollectionsProvider/dashboardSidebarLocal";
@@ -186,7 +184,6 @@ export function useV2PresetExecution({
 					commands = resolvePresetCommands(preset);
 				}
 			} catch (err) {
-				invalidateCapabilitiesOnLaunchError(electronQueryClient, hostUrl, err);
 				console.error("[useV2PresetExecution] Failed to execute preset:", err);
 				toast.error("Failed to run preset", {
 					description:
@@ -315,7 +312,6 @@ export function useV2PresetExecution({
 					}
 				}
 			} catch (err) {
-				invalidateCapabilitiesOnLaunchError(electronQueryClient, hostUrl, err);
 				console.error("[useV2PresetExecution] Failed to execute preset:", err);
 				toast.error("Failed to run preset", {
 					description:
