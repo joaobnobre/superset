@@ -72,6 +72,61 @@ describe("resolveAgentExecutable", () => {
 		).resolves.toEqual({ path: wrapper, source: "path" });
 	});
 
+	test("skips Superset's managed wrapper and resolves the real executable", async () => {
+		const directory = await createTemporaryDirectory();
+		const wrapperDirectory = join(directory, "superset");
+		const nativeDirectory = join(directory, "native");
+		const wrapper = join(wrapperDirectory, "agent");
+		const native = join(nativeDirectory, "agent");
+		await writeExecutable(
+			wrapper,
+			"#!/bin/sh\n# Superset agent-wrapper v3\nexit 127\n",
+		);
+		await writeExecutable(native);
+
+		await expect(
+			resolveAgentExecutable(
+				"agent",
+				{ PATH: `${wrapperDirectory}:${nativeDirectory}` },
+				{ pathDelimiter: ":", platform: "linux" },
+			),
+		).resolves.toEqual({ path: native, source: "wrapper" });
+	});
+
+	test("treats an orphaned Superset wrapper as missing", async () => {
+		const directory = await createTemporaryDirectory();
+		const wrapper = join(directory, "agent");
+		await writeExecutable(
+			wrapper,
+			"#!/bin/sh\n# Superset agent-wrapper v3\nexit 127\n",
+		);
+
+		await expect(
+			resolveAgentExecutable(
+				"agent",
+				{ PATH: directory },
+				{ pathDelimiter: ":", platform: "linux" },
+			),
+		).resolves.toBeNull();
+	});
+
+	test("ignores package dependency bins for implicit agent commands", async () => {
+		const directory = await createTemporaryDirectory();
+		const dependencyBin = join(directory, "node_modules", ".bin", "agent");
+		await writeExecutable(dependencyBin);
+
+		await expect(
+			resolveAgentExecutable(
+				"agent",
+				{ PATH: dirname(dependencyBin) },
+				{ pathDelimiter: ":", platform: "linux" },
+			),
+		).resolves.toBeNull();
+		await expect(
+			resolveAgentExecutable(dependencyBin, {}, { platform: "linux" }),
+		).resolves.toEqual({ path: dependencyBin, source: "explicit" });
+	});
+
 	test("finds Windows cmd shims through PATHEXT", async () => {
 		const directory = await createTemporaryDirectory();
 		const executable = join(directory, "agent.CMD");
