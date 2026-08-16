@@ -26,6 +26,7 @@ import { createRingtoneRouter } from "./ringtone";
 import { createSettingsRouter } from "./settings";
 import { createSystemRouter } from "./system";
 import { createTerminalRouter } from "./terminal";
+import { createTokenUsageRouter } from "./token-usage";
 import { createUiStateRouter } from "./ui-state";
 import { createWindowRouter } from "./window";
 import { createWorkspacesRouter } from "./workspaces";
@@ -49,6 +50,7 @@ export const createAppRouter = (getWindow: () => BrowserWindow | null) => {
 		permissions: createPermissionsRouter(),
 		ports: createPortsRouter(),
 		resourceMetrics: createResourceMetricsRouter(),
+		tokenUsage: createTokenUsageRouter(),
 		menu: createMenuRouter(),
 		external: createExternalRouter(),
 		githubStar: createGithubStarRouter(),

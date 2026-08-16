@@ -28,6 +28,7 @@ import { electronTrpc } from "renderer/lib/electron-trpc";
 import { useFolderFirstImport } from "renderer/routes/_authenticated/_dashboard/components/AddRepositoryModals/hooks/useFolderFirstImport";
 import { NavigationControls } from "renderer/routes/_authenticated/_dashboard/components/NavigationControls";
 import { SidebarToggle } from "renderer/routes/_authenticated/_dashboard/components/SidebarToggle";
+import { TokenUsage } from "renderer/routes/_authenticated/_dashboard/components/TopBar/components/TokenUsage";
 import { useFailedAutomations } from "renderer/routes/_authenticated/_dashboard/hooks/useFailedAutomations";
 import {
 	pullRequestsSearchFromFilters,
@@ -398,6 +399,9 @@ export function DashboardSidebarHeader({
 					<NavigationControls />
 				</ZoomStable>
 				<div className="drag h-full min-w-0 flex-1" />
+				<ZoomStable enabled={isMac} className="flex items-center">
+					<TokenUsage />
+				</ZoomStable>
 			</div>
 
 			<button
