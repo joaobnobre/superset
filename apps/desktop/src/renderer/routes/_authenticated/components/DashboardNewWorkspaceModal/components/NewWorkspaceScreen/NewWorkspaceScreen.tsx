@@ -369,8 +369,14 @@ export function NewWorkspaceScreen({
 		const support = getAgentModelSupport(selectedPresetId);
 		const models = displayInventory?.models ?? [];
 		if (!support || !models.length) return support;
+		const defaultModelId = models.some(
+			(model) => model.id === support.defaultModelId,
+		)
+			? support.defaultModelId
+			: models[0]?.id;
 		return {
 			...support,
+			defaultModelId,
 			models: models.map(({ id, label, provider }) => ({
 				id,
 				label,
@@ -383,7 +389,10 @@ export function NewWorkspaceScreen({
 		modelSupport ? selectedPresetId : null,
 		modelSupport,
 	);
-	const resolvedModel = selectedModel;
+	const resolvedModel =
+		selectedModel ??
+		modelSupport?.defaultModelId ??
+		modelSupport?.models[0]?.id;
 	const effortSupport = useMemo(() => {
 		if (!selectedPresetId) return undefined;
 		const runtimeModel = displayInventory?.models.find(
@@ -413,6 +422,11 @@ export function NewWorkspaceScreen({
 	)
 		? selectedEffort
 		: null;
+	const displayedEffort =
+		resolvedEffort ??
+		effortSupport?.defaultEffortId ??
+		effortSupport?.efforts[0]?.id ??
+		null;
 
 	// ── Base branch ──────────────────────────────────────────────────
 	const { pickerProps } = useBranchPickerController({
@@ -452,7 +466,7 @@ export function NewWorkspaceScreen({
 	const createWorkspace = useSubmitWorkspace(
 		projectId,
 		selectedAgent,
-		modelSupport ? selectedModel : null,
+		modelSupport ? (resolvedModel ?? null) : null,
 		effortSupport ? resolvedEffort : null,
 		uploadAttachments,
 		promptContext,
@@ -726,16 +740,18 @@ export function NewWorkspaceScreen({
 							{modelSupport && (
 								<AgentModelSelect
 									models={modelSupport.models}
-									value={selectedModel}
+									value={resolvedModel ?? null}
 									onValueChange={setSelectedModel}
+									includeDefault={modelSupport.defaultModelId === undefined}
 									triggerClassName={`${PILL_BUTTON_CLASS} px-1.5 gap-1 text-foreground w-auto max-w-[160px]`}
 								/>
 							)}
 							{effortSupport && (
 								<AgentModelSelect
 									models={effortSupport.efforts}
-									value={resolvedEffort}
+									value={displayedEffort}
 									onValueChange={setSelectedEffort}
+									includeDefault={false}
 									triggerClassName={`${PILL_BUTTON_CLASS} px-1.5 gap-1 text-foreground w-auto max-w-[180px]`}
 								/>
 							)}

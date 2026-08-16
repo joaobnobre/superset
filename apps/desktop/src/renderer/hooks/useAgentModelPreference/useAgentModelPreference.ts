@@ -29,7 +29,7 @@ function readStoredModel(
 ): string | null {
 	if (!presetId) return null;
 	const support = supportOverride ?? getAgentModelSupport(presetId);
-	const stored = readStoredMap(storageKey)[presetId];
+	const stored = readStoredMap(storageKey)[presetId] ?? support?.defaultModelId;
 	if (!stored) return null;
 	// Drop ids that fell out of the curated registry so a stale preference
 	// cannot launch the CLI with an unsupported model.
@@ -39,8 +39,9 @@ function readStoredModel(
 /**
  * Last-selected model per agent preset, persisted as a JSON map in
  * localStorage. Keyed by presetId (not config UUID) so the preference
- * survives host switches and agent-config re-creation. `null` means the
- * agent default, so launch omits its model flag until the user chooses one.
+ * survives host switches and agent-config re-creation. Catalogs with an
+ * explicit default select it immediately; `null` omits the model flag for
+ * agents that still expose a synthetic default choice.
  */
 export function useAgentModelPreference(
 	storageKey: string,

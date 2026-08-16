@@ -30,6 +30,8 @@ export type AgentCapabilityTrait<TOption> =
 export interface AgentModelSupport {
 	presetId: string;
 	modelFlag: string | null;
+	/** Model selected when the picker intentionally has no synthetic default. */
+	defaultModelId?: string;
 	/**
 	 * Env var that carries the model when the CLI has no model flag (e.g. Vibe's
 	 * `VIBE_ACTIVE_MODEL`). Mutually exclusive with `modelFlag` in practice.
@@ -77,17 +79,23 @@ export const AGENT_MODEL_SUPPORT: readonly AgentModelSupport[] = [
 	{
 		presetId: "claude",
 		modelFlag: "--model",
+		defaultModelId: "claude-fable-5",
 		models: [
-			{ id: "fable", label: "Fable" },
-			{ id: "opus", label: "Opus" },
+			{ id: "claude-fable-5", label: "Fable 5" },
 			{ id: "claude-opus-5", label: "Opus 5" },
-			{ id: "sonnet", label: "Sonnet" },
-			{ id: "haiku", label: "Haiku" },
+			{ id: "claude-sonnet-5", label: "Sonnet 5" },
+			{ id: "claude-opus-4-8", label: "Opus 4.8" },
+			{ id: "claude-opus-4-7", label: "Opus 4.7" },
+			{ id: "claude-opus-4-6", label: "Opus 4.6" },
+			{ id: "claude-opus-4-5", label: "Opus 4.5" },
+			{ id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
+			{ id: "claude-haiku-4-5", label: "Haiku 4.5" },
 		],
 	},
 	{
 		presetId: "codex",
 		modelFlag: "--model",
+		defaultModelId: "gpt-5.6-sol",
 		models: [
 			{ id: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
 			{ id: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
@@ -102,8 +110,11 @@ export const AGENT_MODEL_SUPPORT: readonly AgentModelSupport[] = [
 		presetId: "gemini",
 		modelFlag: "--model",
 		models: [
+			{ id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro Preview" },
+			{ id: "gemini-3-flash-preview", label: "Gemini 3 Flash Preview" },
 			{ id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
 			{ id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+			{ id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite" },
 		],
 	},
 	{ presetId: "antigravity", modelFlag: "--model", models: [] },
@@ -111,9 +122,14 @@ export const AGENT_MODEL_SUPPORT: readonly AgentModelSupport[] = [
 		presetId: "copilot",
 		modelFlag: "--model",
 		models: [
-			{ id: "claude-fable-5", label: "Claude Fable 5" },
-			{ id: "claude-sonnet-4.5", label: "Claude Sonnet 4.5" },
-			{ id: "gpt-5.1", label: "GPT-5.1" },
+			{ id: "claude-sonnet-4.6", label: "Claude Sonnet 4.6" },
+			{ id: "gpt-5.4", label: "GPT-5.4" },
+			{ id: "claude-haiku-4.5", label: "Claude Haiku 4.5" },
+			{ id: "gpt-5.3-codex", label: "GPT-5.3 Codex" },
+			{ id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro Preview" },
+			{ id: "gemini-3.5-flash", label: "Gemini 3.5 Flash" },
+			{ id: "gemini-3.6-flash", label: "Gemini 3.6 Flash" },
+			{ id: "mai-code-1-flash", label: "MAI-Code-1 Flash" },
 		],
 	},
 	{
@@ -148,12 +164,32 @@ export const AGENT_MODEL_SUPPORT: readonly AgentModelSupport[] = [
 			// no longer lists the old `openai/gpt-5`. anthropic ids follow the
 			// same models.dev catalog but need an authed anthropic provider to
 			// appear in that listing.
-			{ id: "anthropic/claude-opus-5", label: "Claude Opus 5" },
-			{ id: "anthropic/claude-fable-5", label: "Claude Fable 5" },
-			{ id: "anthropic/claude-sonnet-4-5", label: "Claude Sonnet 4.5" },
-			{ id: "openai/gpt-5.6-sol", label: "GPT-5.6 Sol" },
-			{ id: "openai/gpt-5.6-terra", label: "GPT-5.6 Terra" },
-			{ id: "openai/gpt-5.6-luna", label: "GPT-5.6 Luna" },
+			{
+				id: "anthropic/claude-opus-5",
+				label: "Claude Opus 5",
+				provider: "Anthropic",
+			},
+			{
+				id: "anthropic/claude-fable-5",
+				label: "Claude Fable 5",
+				provider: "Anthropic",
+			},
+			{
+				id: "anthropic/claude-sonnet-4-5",
+				label: "Claude Sonnet 4.5",
+				provider: "Anthropic",
+			},
+			{ id: "openai/gpt-5.6-sol", label: "GPT-5.6 Sol", provider: "OpenAI" },
+			{
+				id: "openai/gpt-5.6-terra",
+				label: "GPT-5.6 Terra",
+				provider: "OpenAI",
+			},
+			{
+				id: "openai/gpt-5.6-luna",
+				label: "GPT-5.6 Luna",
+				provider: "OpenAI",
+			},
 		],
 	},
 	{
@@ -187,6 +223,8 @@ export const AGENT_MODEL_SUPPORT: readonly AgentModelSupport[] = [
 export interface AgentEffortSupport {
 	presetId: string;
 	effortFlag: string;
+	/** Agent/model default. It is displayed without requiring an override flag. */
+	defaultEffortId?: string;
 	/**
 	 * Prepended to the selected effort id to form the flag's value token.
 	 * Codex has no dedicated effort flag, so effort rides a config override:
@@ -194,12 +232,38 @@ export interface AgentEffortSupport {
 	 */
 	effortValuePrefix?: string;
 	efforts: AgentModelOption[];
+	modelProfiles?: Readonly<
+		Record<
+			string,
+			{
+				defaultEffortId: string;
+				efforts: readonly AgentModelOption[];
+			}
+		>
+	>;
 }
 
 export interface AgentRuntimeEffortProfile {
 	defaultEffortId?: string;
 	efforts: readonly AgentModelOption[];
 }
+
+const CODEX_STANDARD_EFFORTS: readonly AgentModelOption[] = [
+	{ id: "low", label: "Low" },
+	{ id: "medium", label: "Medium" },
+	{ id: "high", label: "High" },
+	{ id: "xhigh", label: "xHigh" },
+];
+
+const CODEX_MAX_EFFORTS: readonly AgentModelOption[] = [
+	...CODEX_STANDARD_EFFORTS,
+	{ id: "max", label: "Max" },
+];
+
+const CODEX_ULTRA_EFFORTS: readonly AgentModelOption[] = [
+	...CODEX_MAX_EFFORTS,
+	{ id: "ultra", label: "Ultra" },
+];
 
 /**
  * Curated per-agent reasoning-effort catalogs, mirroring
@@ -258,12 +322,30 @@ export const AGENT_EFFORT_SUPPORT: readonly AgentEffortSupport[] = [
 		presetId: "codex",
 		effortFlag: "-c",
 		effortValuePrefix: "model_reasoning_effort=",
-		efforts: [
-			{ id: "low", label: "Low" },
-			{ id: "medium", label: "Medium" },
-			{ id: "high", label: "High" },
-			{ id: "xhigh", label: "xHigh" },
-		],
+		defaultEffortId: "low",
+		efforts: [...CODEX_ULTRA_EFFORTS],
+		modelProfiles: {
+			"gpt-5.6-sol": {
+				defaultEffortId: "low",
+				efforts: CODEX_ULTRA_EFFORTS,
+			},
+			"gpt-5.6-terra": {
+				defaultEffortId: "medium",
+				efforts: CODEX_ULTRA_EFFORTS,
+			},
+			"gpt-5.6-luna": {
+				defaultEffortId: "medium",
+				efforts: CODEX_MAX_EFFORTS,
+			},
+			"gpt-5.5": {
+				defaultEffortId: "medium",
+				efforts: CODEX_STANDARD_EFFORTS,
+			},
+			"gpt-5.4": {
+				defaultEffortId: "medium",
+				efforts: CODEX_STANDARD_EFFORTS,
+			},
+		},
 	},
 	{
 		presetId: "mastracode",
@@ -308,9 +390,20 @@ export function getAgentModelSupport(
 
 export function getAgentEffortSupport(
 	presetId: string,
-	_model?: string | null,
+	model?: string | null,
 ): AgentEffortSupport | undefined {
-	return AGENT_EFFORT_SUPPORT.find((entry) => entry.presetId === presetId);
+	const support = AGENT_EFFORT_SUPPORT.find(
+		(entry) => entry.presetId === presetId,
+	);
+	if (!support?.modelProfiles) return support;
+	if (!model) return support;
+	const profile = support.modelProfiles[model];
+	if (!profile) return undefined;
+	return {
+		...support,
+		defaultEffortId: profile.defaultEffortId,
+		efforts: [...profile.efforts],
+	};
 }
 
 export function resolveAgentEffortSupport(
@@ -318,11 +411,19 @@ export function resolveAgentEffortSupport(
 	model: string | null | undefined,
 	reasoning: AgentCapabilityTrait<AgentModelOption> | undefined,
 ): AgentEffortSupport | undefined {
-	const transport = getAgentEffortSupport(presetId, model);
-	if (!reasoning || reasoning.state === "unknown") return transport;
-	if (!transport || reasoning.state === "unsupported") return undefined;
+	const staticSupport = getAgentEffortSupport(presetId, model);
+	if (!reasoning || reasoning.state === "unknown") return staticSupport;
+	if (reasoning.state === "unsupported") return undefined;
+	const transport = AGENT_EFFORT_SUPPORT.find(
+		(entry) => entry.presetId === presetId,
+	);
+	if (!transport) return undefined;
 	return reasoning.options.length > 0
-		? { ...transport, efforts: [...reasoning.options] }
+		? {
+				...transport,
+				defaultEffortId: reasoning.defaultId,
+				efforts: [...reasoning.options],
+			}
 		: undefined;
 }
 
@@ -339,7 +440,9 @@ export function buildAgentEffortArgs(
 	runtimeProfile?: AgentRuntimeEffortProfile,
 ): string[] {
 	if (!effort) return [];
-	const transport = getAgentEffortSupport(presetId, model);
+	const transport = runtimeProfile
+		? AGENT_EFFORT_SUPPORT.find((entry) => entry.presetId === presetId)
+		: getAgentEffortSupport(presetId, model);
 	const support =
 		transport && runtimeProfile
 			? { ...transport, efforts: [...runtimeProfile.efforts] }

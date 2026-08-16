@@ -69,6 +69,17 @@ describe("getAgentModelSupport", () => {
 		expect(getAgentModelSupport("amp")).toBeUndefined();
 		expect(getAgentModelSupport("nonexistent")).toBeUndefined();
 	});
+
+	it("keeps the versioned Claude catalog and known model defaults", () => {
+		const claude = getAgentModelSupport("claude");
+		expect(claude?.defaultModelId).toBe("claude-fable-5");
+		expect(claude?.models).toContainEqual({
+			id: "claude-sonnet-5",
+			label: "Sonnet 5",
+		});
+		expect(claude?.models.some((model) => model.id === "sonnet")).toBe(false);
+		expect(getAgentModelSupport("codex")?.defaultModelId).toBe("gpt-5.6-sol");
+	});
 });
 
 describe("buildAgentModelArgs", () => {
@@ -78,9 +89,9 @@ describe("buildAgentModelArgs", () => {
 		).toEqual(["--model", "runtime-model"]);
 	});
 	it("builds flag + value tokens", () => {
-		expect(buildAgentModelArgs("claude", "sonnet")).toEqual([
+		expect(buildAgentModelArgs("claude", "claude-sonnet-5")).toEqual([
 			"--model",
-			"sonnet",
+			"claude-sonnet-5",
 		]);
 	});
 
@@ -104,10 +115,10 @@ describe("buildAgentModelArgs", () => {
 		).toEqual([]);
 	});
 
-	it("includes fable in claude's curated list", () => {
-		expect(buildAgentModelArgs("claude", "fable")).toEqual([
+	it("includes the versioned fable id in claude's curated list", () => {
+		expect(buildAgentModelArgs("claude", "claude-fable-5")).toEqual([
 			"--model",
-			"fable",
+			"claude-fable-5",
 		]);
 	});
 
@@ -119,10 +130,6 @@ describe("buildAgentModelArgs", () => {
 	});
 
 	it("includes fable for the other CLIs that support it", () => {
-		expect(buildAgentModelArgs("copilot", "claude-fable-5")).toEqual([
-			"--model",
-			"claude-fable-5",
-		]);
 		expect(
 			buildAgentModelArgs("cursor-agent", "claude-fable-5-thinking-high"),
 		).toEqual(["--model", "claude-fable-5-thinking-high"]);
@@ -204,16 +211,38 @@ describe("getAgentEffortSupport", () => {
 		expect(getAgentEffortSupport("gemini")).toBeUndefined();
 		expect(getAgentEffortSupport("superset")).toBeUndefined();
 	});
+
+	it("keeps Codex fallback levels scoped to each model", () => {
+		expect(getAgentEffortSupport("codex", "gpt-5.6-sol")).toMatchObject({
+			defaultEffortId: "low",
+			efforts: expect.arrayContaining([
+				{ id: "max", label: "Max" },
+				{ id: "ultra", label: "Ultra" },
+			]),
+		});
+		expect(
+			getAgentEffortSupport("codex", "gpt-5.6-luna")?.efforts.map(
+				(effort) => effort.id,
+			),
+		).toEqual(["low", "medium", "high", "xhigh", "max"]);
+		expect(
+			getAgentEffortSupport("codex", "gpt-5.5")?.efforts.map(
+				(effort) => effort.id,
+			),
+		).toEqual(["low", "medium", "high", "xhigh"]);
+	});
 });
 
 describe("resolveAgentEffortSupport", () => {
 	it("uses runtime reasoning options with the curated transport", () => {
-		expect(
-			resolveAgentEffortSupport("opencode", "runtime-model", {
-				state: "supported",
-				options: [{ id: "ultra", label: "Ultra" }],
-			})?.efforts,
-		).toEqual([{ id: "ultra", label: "Ultra" }]);
+		const support = resolveAgentEffortSupport("opencode", "runtime-model", {
+			state: "supported",
+			options: [{ id: "ultra", label: "Ultra" }],
+			defaultId: "ultra",
+		});
+
+		expect(support?.efforts).toEqual([{ id: "ultra", label: "Ultra" }]);
+		expect(support?.defaultEffortId).toBe("ultra");
 	});
 
 	it("does not fall back when runtime reports unsupported", () => {
@@ -238,6 +267,14 @@ describe("buildAgentEffortArgs", () => {
 			"-c",
 			"model_reasoning_effort=high",
 		]);
+	});
+
+	it("accepts runtime effort levels for newly discovered Codex models", () => {
+		expect(
+			buildAgentEffortArgs("codex", "ultra", "future-model", {
+				efforts: [{ id: "ultra", label: "Ultra" }],
+			}),
+		).toEqual(["-c", "model_reasoning_effort=ultra"]);
 	});
 
 	it("returns [] when no effort is set", () => {
