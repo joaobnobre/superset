@@ -222,6 +222,7 @@ export const AGENT_MODEL_SUPPORT: readonly AgentModelSupport[] = [
 
 export interface AgentEffortSupport {
 	presetId: string;
+	label?: string;
 	effortFlag: string;
 	/** Agent/model default. It is displayed without requiring an override flag. */
 	defaultEffortId?: string;
@@ -237,6 +238,7 @@ export interface AgentEffortSupport {
 			string,
 			{
 				defaultEffortId: string;
+				label?: string;
 				efforts: readonly AgentModelOption[];
 			}
 		>
@@ -248,11 +250,75 @@ export interface AgentRuntimeEffortProfile {
 	efforts: readonly AgentModelOption[];
 }
 
+export interface AgentModeOption extends AgentModelOption {
+	/** Exact argv tokens appended when this mode is selected. */
+	args: readonly string[];
+}
+
+export interface AgentModeSupport {
+	presetId: string;
+	label: string;
+	defaultModeId?: string;
+	modes: readonly AgentModeOption[];
+}
+
+export interface AgentSpeedOption extends AgentModelOption {
+	/** Exact argv tokens appended when this speed is selected. */
+	args: readonly string[];
+}
+
+export interface AgentSpeedSupport {
+	presetId: string;
+	label: string;
+	defaultSpeedId?: string;
+	supportedModelIds?: readonly string[];
+	speeds: AgentSpeedOption[];
+}
+
+export interface AgentContextWindowSupport {
+	presetId: string;
+	defaultContextWindowId: string;
+	contextWindows: AgentModelOption[];
+}
+
+function createClaudeContextWindowSupport(
+	defaultContextWindowId: "200k" | "1m",
+): AgentContextWindowSupport {
+	return {
+		presetId: "claude",
+		defaultContextWindowId,
+		contextWindows: [
+			{ id: "200k", label: "200k" },
+			{ id: "1m", label: "1M" },
+		],
+	};
+}
+
+const LOW_TO_MAX_EFFORTS: readonly AgentModelOption[] = [
+	{ id: "low", label: "Low" },
+	{ id: "medium", label: "Medium" },
+	{ id: "high", label: "High" },
+	{ id: "xhigh", label: "Extra High" },
+	{ id: "max", label: "Max" },
+];
+
+const LOW_TO_MAX_WITH_ADVANCED_EFFORTS: readonly AgentModelOption[] = [
+	...LOW_TO_MAX_EFFORTS,
+	{ id: "ultracode", label: "Ultracode" },
+];
+
+const LOW_TO_HIGH_WITH_MAX_EFFORTS: readonly AgentModelOption[] = [
+	{ id: "low", label: "Low" },
+	{ id: "medium", label: "Medium" },
+	{ id: "high", label: "High" },
+	{ id: "max", label: "Max" },
+];
+
 const CODEX_STANDARD_EFFORTS: readonly AgentModelOption[] = [
 	{ id: "low", label: "Low" },
 	{ id: "medium", label: "Medium" },
 	{ id: "high", label: "High" },
-	{ id: "xhigh", label: "xHigh" },
+	{ id: "xhigh", label: "Extra High" },
 ];
 
 const CODEX_MAX_EFFORTS: readonly AgentModelOption[] = [
@@ -276,6 +342,7 @@ export const AGENT_EFFORT_SUPPORT: readonly AgentEffortSupport[] = [
 	{
 		presetId: "antigravity",
 		effortFlag: "--effort",
+		defaultEffortId: "high",
 		efforts: [
 			{ id: "low", label: "Low" },
 			{ id: "medium", label: "Medium" },
@@ -285,25 +352,63 @@ export const AGENT_EFFORT_SUPPORT: readonly AgentEffortSupport[] = [
 	{
 		presetId: "opencode",
 		effortFlag: "--variant",
+		label: "Reasoning",
 		efforts: [
 			{ id: "none", label: "None" },
 			{ id: "low", label: "Low" },
 			{ id: "medium", label: "Medium" },
 			{ id: "high", label: "High" },
-			{ id: "xhigh", label: "xHigh" },
+			{ id: "xhigh", label: "Extra High" },
 			{ id: "max", label: "Max" },
 		],
 	},
 	{
 		presetId: "claude",
 		effortFlag: "--effort",
-		efforts: [
-			{ id: "low", label: "Low" },
-			{ id: "medium", label: "Medium" },
-			{ id: "high", label: "High" },
-			{ id: "xhigh", label: "xHigh" },
-			{ id: "max", label: "Max" },
-		],
+		label: "Reasoning",
+		efforts: [...LOW_TO_MAX_WITH_ADVANCED_EFFORTS],
+		modelProfiles: {
+			"claude-fable-5": {
+				defaultEffortId: "high",
+				efforts: LOW_TO_MAX_WITH_ADVANCED_EFFORTS,
+			},
+			"claude-opus-5": {
+				defaultEffortId: "high",
+				efforts: LOW_TO_MAX_WITH_ADVANCED_EFFORTS,
+			},
+			"claude-sonnet-5": {
+				defaultEffortId: "high",
+				efforts: LOW_TO_MAX_EFFORTS,
+			},
+			"claude-opus-4-8": {
+				defaultEffortId: "high",
+				efforts: LOW_TO_MAX_WITH_ADVANCED_EFFORTS,
+			},
+			"claude-opus-4-7": {
+				defaultEffortId: "xhigh",
+				efforts: LOW_TO_MAX_EFFORTS,
+			},
+			"claude-opus-4-6": {
+				defaultEffortId: "high",
+				efforts: LOW_TO_HIGH_WITH_MAX_EFFORTS,
+			},
+			"claude-opus-4-5": {
+				defaultEffortId: "high",
+				efforts: LOW_TO_HIGH_WITH_MAX_EFFORTS,
+			},
+			"claude-sonnet-4-6": {
+				defaultEffortId: "high",
+				efforts: LOW_TO_HIGH_WITH_MAX_EFFORTS,
+			},
+			"claude-haiku-4-5": {
+				defaultEffortId: "off",
+				label: "Thinking",
+				efforts: [
+					{ id: "off", label: "Off" },
+					{ id: "on", label: "On" },
+				],
+			},
+		},
 	},
 	{
 		presetId: "amp",
@@ -382,6 +487,100 @@ export const AGENT_EFFORT_SUPPORT: readonly AgentEffortSupport[] = [
 	},
 ];
 
+/** Launch-time performance choices that are independent from reasoning. */
+export const AGENT_SPEED_SUPPORT: readonly AgentSpeedSupport[] = [
+	{
+		presetId: "codex",
+		label: "Service Tier",
+		defaultSpeedId: "standard",
+		supportedModelIds: [
+			"gpt-5.6-sol",
+			"gpt-5.6-terra",
+			"gpt-5.6-luna",
+			"gpt-5.5",
+			"gpt-5.4",
+		],
+		speeds: [
+			{
+				id: "standard",
+				label: "Standard",
+				args: ["--disable", "fast_mode"],
+			},
+			{ id: "fast", label: "Fast", args: ["--enable", "fast_mode"] },
+		],
+	},
+	{
+		presetId: "claude",
+		label: "Fast Mode",
+		defaultSpeedId: "standard",
+		supportedModelIds: [
+			"claude-opus-5",
+			"claude-opus-4-8",
+			"claude-opus-4-7",
+			"claude-opus-4-6",
+			"claude-opus-4-5",
+		],
+		speeds: [
+			{
+				id: "standard",
+				label: "Off",
+				args: ["--settings", '{"fastMode":false}'],
+			},
+			{
+				id: "fast",
+				label: "On",
+				args: ["--settings", '{"fastMode":true}'],
+			},
+		],
+	},
+];
+
+/** Agent personas that are independent from model reasoning. */
+export const AGENT_MODE_SUPPORT: readonly AgentModeSupport[] = [
+	{
+		presetId: "opencode",
+		label: "Agent",
+		defaultModeId: "build",
+		modes: [
+			{ id: "build", label: "Build", args: ["--agent", "build"] },
+			{ id: "plan", label: "Plan", args: ["--agent", "plan"] },
+		],
+	},
+];
+
+const AGENT_CONTEXT_WINDOW_SUPPORT: Readonly<
+	Record<string, AgentContextWindowSupport>
+> = {
+	"claude:claude-fable-5": createClaudeContextWindowSupport("1m"),
+	"claude:claude-opus-5": createClaudeContextWindowSupport("1m"),
+	"claude:claude-opus-4-6": createClaudeContextWindowSupport("1m"),
+	"claude:claude-sonnet-5": createClaudeContextWindowSupport("200k"),
+	"claude:claude-sonnet-4-6": createClaudeContextWindowSupport("200k"),
+};
+
+function normalizeAgentEffort(
+	presetId: string,
+	model: string | undefined,
+	effort: string,
+): string {
+	if (presetId === "claude" && effort === "ultracode") return "xhigh";
+	if (
+		presetId === "claude" &&
+		model === "claude-opus-4-7" &&
+		effort === "xhigh"
+	) {
+		return "max";
+	}
+	if (
+		presetId === "claude" &&
+		model === "claude-sonnet-4-6" &&
+		effort === "max"
+	) {
+		return "high";
+	}
+	return effort;
+}
+
 export function getAgentModelSupport(
 	presetId: string,
 ): AgentModelSupport | undefined {
@@ -402,6 +601,7 @@ export function getAgentEffortSupport(
 	return {
 		...support,
 		defaultEffortId: profile.defaultEffortId,
+		label: profile.label ?? support.label,
 		efforts: [...profile.efforts],
 	};
 }
@@ -427,6 +627,58 @@ export function resolveAgentEffortSupport(
 		: undefined;
 }
 
+export function getAgentSpeedSupport(
+	presetId: string,
+	model?: string | null,
+): AgentSpeedSupport | undefined {
+	const support = AGENT_SPEED_SUPPORT.find(
+		(entry) => entry.presetId === presetId,
+	);
+	if (!support) return undefined;
+	if (
+		support.supportedModelIds &&
+		(!model || !support.supportedModelIds.includes(model))
+	) {
+		return undefined;
+	}
+	return support;
+}
+
+export function getAgentModeSupport(
+	presetId: string,
+): AgentModeSupport | undefined {
+	return AGENT_MODE_SUPPORT.find((entry) => entry.presetId === presetId);
+}
+
+export function getAgentContextWindowSupport(
+	presetId: string,
+	model?: string | null,
+): AgentContextWindowSupport | undefined {
+	if (!model) return undefined;
+	return AGENT_CONTEXT_WINDOW_SUPPORT[`${presetId}:${model}`];
+}
+
+export function buildAgentSpeedArgs(
+	presetId: string,
+	speed: string | undefined,
+	model?: string,
+): string[] {
+	if (!speed) return [];
+	const support = getAgentSpeedSupport(presetId, model);
+	const option = support?.speeds.find((candidate) => candidate.id === speed);
+	return option ? [...option.args] : [];
+}
+
+export function buildAgentModeArgs(
+	presetId: string,
+	mode: string | undefined,
+): string[] {
+	if (!mode) return [];
+	const support = getAgentModeSupport(presetId);
+	const option = support?.modes.find((candidate) => candidate.id === mode);
+	return option ? [...option.args] : [];
+}
+
 /**
  * Argv tokens that select `effort` for the given preset, e.g.
  * `["--effort", "high"]` (codex: `["-c", "model_reasoning_effort=high"]`).
@@ -449,7 +701,56 @@ export function buildAgentEffortArgs(
 			: transport;
 	if (!support) return [];
 	if (!support.efforts.some((option) => option.id === effort)) return [];
-	return [support.effortFlag, `${support.effortValuePrefix ?? ""}${effort}`];
+	if (presetId === "claude" && model === "claude-haiku-4-5") return [];
+	const normalizedEffort = normalizeAgentEffort(presetId, model, effort);
+	return [
+		support.effortFlag,
+		`${support.effortValuePrefix ?? ""}${normalizedEffort}`,
+	];
+}
+
+interface AgentRuntimeTraits {
+	model?: string;
+	effort?: string;
+	speed?: string;
+}
+
+/** Claude settings must be emitted once because repeated flags do not compose. */
+export function buildAgentRuntimeTraitArgs(
+	presetId: string,
+	traits: AgentRuntimeTraits,
+): string[] {
+	if (presetId !== "claude") {
+		return buildAgentSpeedArgs(presetId, traits.speed, traits.model);
+	}
+
+	const settings: Record<string, boolean> = {};
+	const speedSupport = getAgentSpeedSupport(presetId, traits.model);
+	if (
+		traits.speed &&
+		speedSupport?.speeds.some((option) => option.id === traits.speed)
+	) {
+		settings.fastMode = traits.speed === "fast";
+	}
+
+	const effortSupport = getAgentEffortSupport(presetId, traits.model);
+	const effortSupported = effortSupport?.efforts.some(
+		(option) => option.id === traits.effort,
+	);
+	if (effortSupported && traits.effort === "ultracode") {
+		settings.ultracode = true;
+	}
+	if (
+		effortSupported &&
+		traits.model === "claude-haiku-4-5" &&
+		(traits.effort === "on" || traits.effort === "off")
+	) {
+		settings.alwaysThinkingEnabled = traits.effort === "on";
+	}
+
+	return Object.keys(settings).length > 0
+		? ["--settings", JSON.stringify(settings)]
+		: [];
 }
 
 /**
@@ -463,6 +764,7 @@ export function buildAgentEffortArgs(
 export function buildAgentModelArgs(
 	presetId: string,
 	model: string | undefined,
+	contextWindow?: string,
 	runtimeModelIds?: readonly string[],
 ): string[] {
 	if (!model) return [];
@@ -471,7 +773,14 @@ export function buildAgentModelArgs(
 	const allowedModelIds =
 		runtimeModelIds ?? support.models.map((option) => option.id);
 	if (!allowedModelIds.includes(model)) return [];
-	return [support.modelFlag, model];
+	const contextSupport = getAgentContextWindowSupport(presetId, model);
+	const resolvedModel =
+		contextSupport?.contextWindows.some(
+			(option) => option.id === contextWindow,
+		) && contextWindow === "1m"
+			? `${model}[1m]`
+			: model;
+	return [support.modelFlag, resolvedModel];
 }
 
 /**

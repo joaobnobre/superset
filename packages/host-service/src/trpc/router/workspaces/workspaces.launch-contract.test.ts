@@ -94,6 +94,32 @@ describe("workspaces launch contract", () => {
 		expect(db.select().from(schema.workspaces).all()).toEqual([]);
 	});
 
+	it("preserves launch traits through the workspace-create schema", async () => {
+		const db = createTestDb();
+		seedClaude(db);
+		const caller = createCaller(db);
+		try {
+			await caller.create({
+				projectId: PROJECT_ID,
+				agents: [
+					{
+						agent: "claude",
+						prompt: "do the thing",
+						model: "claude-opus-5",
+						speed: "turbo",
+					},
+				],
+			});
+			throw new Error("Expected create to fail");
+		} catch (error) {
+			expect(error).toBeInstanceOf(TRPCError);
+			expect((error as Error).message).toContain(
+				'Unsupported speed "turbo" for Claude',
+			);
+		}
+		expect(db.select().from(schema.workspaces).all()).toEqual([]);
+	});
+
 	it("setup-terminal chaining preserves the exact validated model", async () => {
 		const db = createTestDb();
 		seedClaude(db);
@@ -102,8 +128,15 @@ describe("workspaces launch contract", () => {
 			agent: "claude",
 			prompt: "do the thing",
 			model: "claude-opus-5",
+			effort: "ultracode",
+			speed: "fast",
+			contextWindow: "1m",
 		});
-		expect(launch.fullCommand).toContain("'--model' 'claude-opus-5'");
+		expect(launch.fullCommand).toContain("'--model' 'claude-opus-5[1m]'");
+		expect(launch.fullCommand).toContain("'--effort' 'xhigh'");
+		expect(launch.fullCommand).toContain(
+			'\'{"fastMode":true,"ultracode":true}\'',
+		);
 		expect(launch.fullCommand).not.toContain("claude-fable-5");
 	});
 });

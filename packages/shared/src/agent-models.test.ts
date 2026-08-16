@@ -3,10 +3,16 @@ import {
 	AGENT_EFFORT_SUPPORT,
 	AGENT_MODEL_SUPPORT,
 	buildAgentEffortArgs,
+	buildAgentModeArgs,
 	buildAgentModelArgs,
 	buildAgentModelEnv,
+	buildAgentRuntimeTraitArgs,
+	buildAgentSpeedArgs,
+	getAgentContextWindowSupport,
 	getAgentEffortSupport,
 	getAgentModelSupport,
+	getAgentModeSupport,
+	getAgentSpeedSupport,
 	resolveAgentEffortSupport,
 	SUPERSET_CHAT_MODELS,
 } from "./agent-models";
@@ -85,7 +91,9 @@ describe("getAgentModelSupport", () => {
 describe("buildAgentModelArgs", () => {
 	it("accepts a model returned by runtime discovery", () => {
 		expect(
-			buildAgentModelArgs("antigravity", "runtime-model", ["runtime-model"]),
+			buildAgentModelArgs("antigravity", "runtime-model", undefined, [
+				"runtime-model",
+			]),
 		).toEqual(["--model", "runtime-model"]);
 	});
 	it("builds flag + value tokens", () => {
@@ -289,6 +297,50 @@ describe("buildAgentEffortArgs", () => {
 	it("returns [] for effort ids outside the preset's curated list", () => {
 		expect(buildAgentEffortArgs("claude", "bogus")).toEqual([]);
 		expect(buildAgentEffortArgs("copilot", "max")).toEqual([]);
+	});
+});
+
+describe("agent launch traits", () => {
+	it("exposes Claude Ultracode, Fast Mode, and model-specific context", () => {
+		expect(
+			getAgentEffortSupport("claude", "claude-opus-5")?.efforts,
+		).toContainEqual({ id: "ultracode", label: "Ultracode" });
+		expect(getAgentSpeedSupport("claude", "claude-opus-5")).toMatchObject({
+			label: "Fast Mode",
+			defaultSpeedId: "standard",
+		});
+		expect(
+			getAgentContextWindowSupport("claude", "claude-opus-5")
+				?.defaultContextWindowId,
+		).toBe("1m");
+		expect(buildAgentModelArgs("claude", "claude-opus-5", "1m")).toEqual([
+			"--model",
+			"claude-opus-5[1m]",
+		]);
+		expect(
+			buildAgentRuntimeTraitArgs("claude", {
+				model: "claude-opus-5",
+				effort: "ultracode",
+				speed: "fast",
+			}),
+		).toEqual(["--settings", '{"fastMode":true,"ultracode":true}']);
+	});
+
+	it("exposes Codex Service Tier and maps it to the stable feature flag", () => {
+		expect(getAgentSpeedSupport("codex", "gpt-5.6-sol")).toMatchObject({
+			label: "Service Tier",
+			defaultSpeedId: "standard",
+		});
+		expect(buildAgentSpeedArgs("codex", "fast", "gpt-5.6-sol")).toEqual([
+			"--enable",
+			"fast_mode",
+		]);
+	});
+
+	it("keeps OpenCode reasoning variants separate from agent modes", () => {
+		expect(getAgentEffortSupport("opencode")?.label).toBe("Reasoning");
+		expect(getAgentModeSupport("opencode")?.label).toBe("Agent");
+		expect(buildAgentModeArgs("opencode", "plan")).toEqual(["--agent", "plan"]);
 	});
 });
 

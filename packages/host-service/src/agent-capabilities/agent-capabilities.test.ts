@@ -11,6 +11,7 @@ import {
 	mapCopilotModels,
 	parseAntigravityModels,
 	parseCodexModelsCache,
+	parseCursorModels,
 	parseGrokModels,
 	parseKimiProviderModels,
 	parseLineModels,
@@ -218,6 +219,91 @@ describe("agent capabilities", () => {
 			{
 				id: "openai/gpt-5.6-sol",
 				label: "GPT-5.6 Sol",
+				reasoning: { state: "unknown" },
+			},
+		]);
+	});
+
+	test("parses only Cursor model rows and groups them by provider", () => {
+		expect(
+			parseCursorModels(
+				[
+					"Available models",
+					"",
+					"auto - Auto (default)",
+					"claude-opus-5-thinking-high - Opus 5 1M Thinking",
+					"gpt-5.6-sol-high - GPT-5.6 Sol 1M High",
+					"gemini-3.7-flash-high - Gemini 3.7 Flash",
+					"cursor-grok-4.6-high - Cursor Grok 4.6",
+					"composer-2.5 - Composer 2.5",
+					"kimi-k3-max - Kimi K3",
+					"glm-5.2-max - GLM 5.2 Max",
+					"",
+					"Tip: use --model <id> to switch.",
+				].join("\n"),
+			),
+		).toEqual([
+			{
+				id: "auto",
+				label: "Auto (default)",
+				provider: "Recommended",
+				reasoning: { state: "unknown" },
+			},
+			{
+				id: "claude-opus-5-thinking-high",
+				label: "Opus 5 1M Thinking",
+				provider: "Anthropic",
+				reasoning: { state: "unknown" },
+			},
+			{
+				id: "gpt-5.6-sol-high",
+				label: "GPT-5.6 Sol 1M High",
+				provider: "OpenAI",
+				reasoning: { state: "unknown" },
+			},
+			{
+				id: "gemini-3.7-flash-high",
+				label: "Gemini 3.7 Flash",
+				provider: "Google",
+				reasoning: { state: "unknown" },
+			},
+			{
+				id: "cursor-grok-4.6-high",
+				label: "Cursor Grok 4.6",
+				provider: "xAI",
+				reasoning: { state: "unknown" },
+			},
+			{
+				id: "composer-2.5",
+				label: "Composer 2.5",
+				provider: "Cursor",
+				reasoning: { state: "unknown" },
+			},
+			{
+				id: "kimi-k3-max",
+				label: "Kimi K3",
+				provider: "Moonshot AI",
+				reasoning: { state: "unknown" },
+			},
+			{
+				id: "glm-5.2-max",
+				label: "GLM 5.2 Max",
+				provider: "Zhipu AI",
+				reasoning: { state: "unknown" },
+			},
+		]);
+	});
+
+	test("rejects Cursor headings, footers, and malformed prose", () => {
+		expect(
+			parseCursorModels(
+				"Available models\nnot a model\nauto - Auto (default)\nTip: use --model <id>\nfooter-model - Must not appear",
+			),
+		).toEqual([
+			{
+				id: "auto",
+				label: "Auto (default)",
+				provider: "Recommended",
 				reasoning: { state: "unknown" },
 			},
 		]);

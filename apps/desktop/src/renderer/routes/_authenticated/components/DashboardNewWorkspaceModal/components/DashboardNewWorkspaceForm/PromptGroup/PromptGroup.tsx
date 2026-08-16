@@ -1,5 +1,8 @@
 import {
+	getAgentContextWindowSupport,
 	getAgentModelSupport,
+	getAgentModeSupport,
+	getAgentSpeedSupport,
 	resolveAgentEffortSupport,
 } from "@superset/shared/agent-models";
 import { sanitizeUserBranchName } from "@superset/shared/workspace-launch";
@@ -30,9 +33,12 @@ import { IssueLinkCommand } from "renderer/components/IssueLinkCommand";
 import { LinkedIssuePill } from "renderer/components/LinkedIssuePill";
 import { MarkdownEditor } from "renderer/components/MarkdownEditor";
 import { resolveHostUrl } from "renderer/hooks/host-service/useHostTargetUrl";
+import { useAgentContextWindowPreference } from "renderer/hooks/useAgentContextWindowPreference";
 import { useAgentEffortPreference } from "renderer/hooks/useAgentEffortPreference";
 import { useAgentLaunchPreferences } from "renderer/hooks/useAgentLaunchPreferences";
 import { useAgentModelPreference } from "renderer/hooks/useAgentModelPreference";
+import { useAgentModePreference } from "renderer/hooks/useAgentModePreference";
+import { useAgentSpeedPreference } from "renderer/hooks/useAgentSpeedPreference";
 import { useRelayUrl } from "renderer/hooks/useRelayUrl";
 import {
 	getCapabilityDisplayInventory,
@@ -57,6 +63,7 @@ import { PRLinkCommand } from "./components/PRLinkCommand";
 import { ProjectPickerPill } from "./components/ProjectPickerPill";
 import { PromptHistoryCommand } from "./components/PromptHistoryCommand";
 import { UploadingAttachmentPill } from "./components/UploadingAttachmentPill";
+import { WorkspaceAgentTraitsPicker } from "./components/WorkspaceAgentTraitsPicker";
 import { useBranchPickerController } from "./hooks/useBranchPickerController";
 import { useLinkedContext } from "./hooks/useLinkedContext";
 import { useSubmitWorkspace } from "./hooks/useSubmitWorkspace";
@@ -66,10 +73,13 @@ import {
 } from "./hooks/useUploadAttachments";
 import {
 	AGENT_STORAGE_KEY,
+	CONTEXT_WINDOW_STORAGE_KEY,
 	EFFORT_STORAGE_KEY,
+	MODE_TRAIT_STORAGE_KEY,
 	MODEL_STORAGE_KEY,
 	PILL_BUTTON_CLASS,
 	type ProjectOption,
+	SPEED_STORAGE_KEY,
 	type WorkspaceCreateAgent,
 } from "./types";
 
@@ -259,11 +269,40 @@ export function PromptGroup({
 	)
 		? selectedEffort
 		: null;
-	const displayedEffort =
-		resolvedEffort ??
-		effortSupport?.defaultEffortId ??
-		effortSupport?.efforts[0]?.id ??
-		null;
+	const modeSupport = selectedPresetId
+		? getAgentModeSupport(selectedPresetId)
+		: undefined;
+	const { selectedMode, setSelectedMode } = useAgentModePreference(
+		MODE_TRAIT_STORAGE_KEY,
+		modeSupport ? selectedPresetId : null,
+	);
+	const speedSupport = selectedPresetId
+		? getAgentSpeedSupport(selectedPresetId, resolvedModel)
+		: undefined;
+	const { selectedSpeed, setSelectedSpeed } = useAgentSpeedPreference(
+		SPEED_STORAGE_KEY,
+		speedSupport ? selectedPresetId : null,
+		resolvedModel ?? null,
+	);
+	const contextWindowSupport = selectedPresetId
+		? getAgentContextWindowSupport(selectedPresetId, resolvedModel)
+		: undefined;
+	const { selectedContextWindow, setSelectedContextWindow } =
+		useAgentContextWindowPreference(
+			CONTEXT_WINDOW_STORAGE_KEY,
+			contextWindowSupport ? selectedPresetId : null,
+			resolvedModel ?? null,
+		);
+	const resolvedSpeed = speedSupport?.speeds.some(
+		(option) => option.id === selectedSpeed,
+	)
+		? selectedSpeed
+		: (speedSupport?.defaultSpeedId ?? null);
+	const resolvedContextWindow = contextWindowSupport?.contextWindows.some(
+		(option) => option.id === selectedContextWindow,
+	)
+		? selectedContextWindow
+		: (contextWindowSupport?.defaultContextWindowId ?? null);
 
 	// Promote the internal "none" placeholder to the first configured agent.
 	// The create-workspace picker no longer offers a no-agent choice, so stale
@@ -390,6 +429,9 @@ export function PromptGroup({
 		selectedAgent,
 		modelSupport ? (resolvedModel ?? null) : null,
 		effortSupport ? resolvedEffort : null,
+		modeSupport ? selectedMode : null,
+		speedSupport ? resolvedSpeed : null,
+		contextWindowSupport ? resolvedContextWindow : null,
 		uploadAttachments,
 		promptContext,
 	);
@@ -628,13 +670,24 @@ export function PromptGroup({
 								triggerClassName={`${PILL_BUTTON_CLASS} px-1.5 gap-1 text-foreground w-auto max-w-[160px]`}
 							/>
 						)}
-						{effortSupport && (
-							<AgentModelSelect
-								models={effortSupport.efforts}
-								value={displayedEffort}
-								onValueChange={setSelectedEffort}
-								includeDefault={false}
-								triggerClassName={`${PILL_BUTTON_CLASS} px-1.5 gap-1 text-foreground w-auto max-w-[160px]`}
+						{(effortSupport ||
+							modeSupport ||
+							speedSupport ||
+							contextWindowSupport) && (
+							<WorkspaceAgentTraitsPicker
+								effortSupport={effortSupport}
+								modeSupport={modeSupport}
+								speedSupport={speedSupport}
+								contextWindowSupport={contextWindowSupport}
+								effort={resolvedEffort}
+								mode={selectedMode}
+								speed={resolvedSpeed}
+								contextWindow={resolvedContextWindow}
+								onEffortChange={setSelectedEffort}
+								onModeChange={setSelectedMode}
+								onSpeedChange={setSelectedSpeed}
+								onContextWindowChange={setSelectedContextWindow}
+								triggerClassName={`${PILL_BUTTON_CLASS} px-1.5 gap-1 text-foreground w-auto max-w-[180px]`}
 							/>
 						)}
 					</PromptInputTools>

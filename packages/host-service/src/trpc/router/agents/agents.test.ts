@@ -360,7 +360,35 @@ describe("buildTerminalAgentLaunch", () => {
 		);
 	});
 
-	it("forwards OpenCode reasoning variants as effort", async () => {
+	it("combines Claude Fast Mode and Ultracode settings", async () => {
+		const db = createTestDb();
+		const config = seedConfig(db);
+		const selection = {
+			model: "claude-opus-5",
+			effort: "ultracode",
+			speed: "fast",
+		};
+		const validated = await validateFromSnapshot(
+			db,
+			{ agent: "claude", ...selection },
+			fallbackSnapshot(config),
+		);
+		const launch = buildTerminalAgentLaunch(
+			db,
+			{
+				workspaceId: WORKSPACE_ID,
+				agent: "claude",
+				prompt: "do the thing",
+				...selection,
+			},
+			validated,
+		);
+		expect(launch.fullCommand).toBe(
+			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--model' 'claude-opus-5' '--effort' 'xhigh' '--settings' '{\"fastMode\":true,\"ultracode\":true}' 'do the thing'",
+		);
+	});
+
+	it("keeps OpenCode reasoning variants independent from agent modes", async () => {
 		const db = createTestDb();
 		const config = {
 			id: OPENCODE_CONFIG_ID,
@@ -385,6 +413,7 @@ describe("buildTerminalAgentLaunch", () => {
 		const selection = {
 			model: "openai/gpt-5.6-sol",
 			effort: "high",
+			mode: "plan",
 		};
 		const validated = await validateFromSnapshot(
 			db,
@@ -402,7 +431,7 @@ describe("buildTerminalAgentLaunch", () => {
 			validated,
 		);
 		expect(launch.fullCommand).toBe(
-			"'opencode' '--model' 'openai/gpt-5.6-sol' '--variant' 'high' 'do the thing'",
+			"'opencode' '--model' 'openai/gpt-5.6-sol' '--variant' 'high' '--agent' 'plan' 'do the thing'",
 		);
 	});
 
@@ -427,6 +456,30 @@ describe("buildTerminalAgentLaunch", () => {
 		);
 		expect(launch.fullCommand).toBe(
 			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--model' 'claude-opus-5' 'ultrathink about this change'",
+		);
+	});
+
+	it("forwards a supported Claude context window in the model id", async () => {
+		const db = createTestDb();
+		const config = seedConfig(db);
+		const selection = { model: "claude-opus-5", contextWindow: "1m" };
+		const validated = await validateFromSnapshot(
+			db,
+			{ agent: "claude", ...selection },
+			fallbackSnapshot(config),
+		);
+		const launch = buildTerminalAgentLaunch(
+			db,
+			{
+				workspaceId: WORKSPACE_ID,
+				agent: "claude",
+				prompt: "do the thing",
+				...selection,
+			},
+			validated,
+		);
+		expect(launch.fullCommand).toBe(
+			"FOO='bar' 'claude' '--dangerously-skip-permissions' '--model' 'claude-opus-5[1m]' 'do the thing'",
 		);
 	});
 
@@ -519,7 +572,7 @@ describe("buildTerminalAgentLaunch", () => {
 		const config = seedConfig(db);
 		const validated = await validateFromSnapshot(
 			db,
-			{ agent: "claude", model: "fable" },
+			{ agent: "claude", model: "claude-fable-5" },
 			fallbackSnapshot(config),
 		);
 		try {
@@ -791,7 +844,7 @@ describe("validateAgentEffortSelection", () => {
 			expect(error).toBeInstanceOf(TRPCError);
 			expect((error as TRPCError).code).toBe("BAD_REQUEST");
 			expect((error as Error).message).toBe(
-				'Unsupported reasoning effort "extreme" for Codex. Choose one of: low, medium, high, xhigh.',
+				'Unsupported reasoning effort "extreme" for Codex. Choose one of: low, medium, high, xhigh, max, ultra.',
 			);
 		}
 	});

@@ -493,6 +493,54 @@ export function parseLineModels(output: string): AgentCapabilityModel[] {
 	return models;
 }
 
+function cursorModelProvider(id: string): string {
+	if (id === "auto") return "Recommended";
+	if (id.startsWith("claude-")) return "Anthropic";
+	if (id.startsWith("gpt-")) return "OpenAI";
+	if (id.startsWith("gemini-")) return "Google";
+	if (id.startsWith("cursor-grok-")) return "xAI";
+	if (id.startsWith("composer-")) return "Cursor";
+	if (id.startsWith("kimi-")) return "Moonshot AI";
+	if (id.startsWith("glm-")) return "Zhipu AI";
+	return "Other";
+}
+
+/**
+ * Cursor prints a human-readable inventory between an `Available models`
+ * heading and a `Tip:` footer. Parse only rows with its documented
+ * `<id> - <label>` shape so surrounding prose can never become a model.
+ */
+export function parseCursorModels(output: string): AgentCapabilityModel[] {
+	const models: AgentCapabilityModel[] = [];
+	const seen = new Set<string>();
+	let inInventory = false;
+
+	for (const rawLine of output.split(/\r?\n/)) {
+		const line = rawLine.trim();
+		if (/^Available models:?$/i.test(line)) {
+			inInventory = true;
+			continue;
+		}
+		if (!inInventory) continue;
+		if (/^Tip:/i.test(line)) break;
+		if (!line) continue;
+
+		const match = line.match(/^(\S+)\s+-\s+(.+)$/);
+		const id = match?.[1];
+		const label = match?.[2]?.trim();
+		if (!id || !label || seen.has(id)) continue;
+		seen.add(id);
+		models.push({
+			id,
+			label,
+			provider: cursorModelProvider(id),
+			reasoning: { state: "unknown" },
+		});
+	}
+
+	return models;
+}
+
 const ANTIGRAVITY_EFFORT_ORDER = ["low", "medium", "high"] as const;
 
 function titleAntigravityModelId(id: string): string {
@@ -1299,7 +1347,7 @@ async function discoverModels(
 		const models =
 			config.presetId === "opencode"
 				? parseOpenCodeModels(result.stdout)
-				: parseLineModels(result.stdout);
+				: parseCursorModels(result.stdout);
 		const output = `${result.stdout}\n${result.stderr}`;
 		if (/authentication required|not authenticated|run .*login/i.test(output)) {
 			return {
