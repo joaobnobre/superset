@@ -9,6 +9,7 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { CapabilityRefreshService } from "../../../agent-capabilities/capability-refresh-service";
+import { CAPABILITY_INVENTORY_SCHEMA_VERSION } from "../../../agent-capabilities/capability-snapshot-repository";
 import type { HostDb } from "../../../db";
 import * as schema from "../../../db/schema";
 import type { HostServiceContext } from "../../../types";
@@ -60,7 +61,7 @@ function insertHealthSnapshot(
 			agentId: config.id,
 			presetId: config.presetId,
 			configRevision: config.capabilityRevision ?? 1,
-			schemaVersion: 1,
+			schemaVersion: CAPABILITY_INVENTORY_SCHEMA_VERSION,
 			inventoryJson: null,
 			status: "ready",
 			installed: true,
@@ -227,7 +228,7 @@ describe("agentConfigsRouter", () => {
 					agentId: config.id,
 					presetId: config.presetId,
 					configRevision: 1,
-					schemaVersion: 1,
+					schemaVersion: CAPABILITY_INVENTORY_SCHEMA_VERSION,
 					inventoryJson: null,
 					status: "unknown",
 					installed: null,

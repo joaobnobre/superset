@@ -237,7 +237,7 @@ function persistLaunchSnapshot(
 			snapshot.modelSource === "none"
 				? null
 				: {
-						schemaVersion: 1,
+						schemaVersion: 2,
 						agentId: config.id,
 						presetId: config.presetId,
 						configRevision: config.capabilityRevision ?? 1,

@@ -11,7 +11,7 @@ import type {
 } from "./agent-capabilities";
 import type { AgentExecutableSource } from "./executable-resolver";
 
-export const CAPABILITY_INVENTORY_SCHEMA_VERSION = 1;
+export const CAPABILITY_INVENTORY_SCHEMA_VERSION = 2;
 export const MAX_CAPABILITY_INVENTORY_BYTES = 512 * 1024;
 export const MAX_CAPABILITY_MODELS = 2_000;
 export const MAX_CAPABILITY_STRING_LENGTH = 512;
@@ -110,6 +110,17 @@ const modelSchema: z.ZodType<AgentCapabilityModel> = z
 		label: boundedString,
 		provider: boundedString.optional(),
 		reasoning: traitSchema,
+		variant: z
+			.object({
+				familyId: boundedString,
+				familyLabel: boundedString,
+				effort: boundedString,
+				speed: z.enum(["standard", "fast"]),
+				mode: z.enum(["standard", "thinking"]),
+				contextWindow: z.enum(["default", "1m"]),
+			})
+			.strict()
+			.optional(),
 	})
 	.strict();
 const inventorySchema: z.ZodType<AgentCapabilityInventory> = z

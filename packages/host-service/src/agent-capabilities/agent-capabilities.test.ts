@@ -12,6 +12,7 @@ import {
 	parseAntigravityModels,
 	parseCodexModelsCache,
 	parseCursorModels,
+	parseCursorModelVariant,
 	parseGrokModels,
 	parseKimiProviderModels,
 	parseLineModels,
@@ -248,48 +249,112 @@ describe("agent capabilities", () => {
 				label: "Auto (default)",
 				provider: "Recommended",
 				reasoning: { state: "unknown" },
+				variant: {
+					familyId: "auto",
+					familyLabel: "Auto",
+					effort: "default",
+					speed: "standard",
+					mode: "standard",
+					contextWindow: "default",
+				},
 			},
 			{
 				id: "claude-opus-5-thinking-high",
 				label: "Opus 5 1M Thinking",
 				provider: "Anthropic",
 				reasoning: { state: "unknown" },
+				variant: {
+					familyId: "claude-opus-5",
+					familyLabel: "Opus 5",
+					effort: "high",
+					speed: "standard",
+					mode: "thinking",
+					contextWindow: "1m",
+				},
 			},
 			{
 				id: "gpt-5.6-sol-high",
 				label: "GPT-5.6 Sol 1M High",
 				provider: "OpenAI",
 				reasoning: { state: "unknown" },
+				variant: {
+					familyId: "gpt-5.6-sol",
+					familyLabel: "GPT-5.6 Sol",
+					effort: "high",
+					speed: "standard",
+					mode: "standard",
+					contextWindow: "1m",
+				},
 			},
 			{
 				id: "gemini-3.7-flash-high",
 				label: "Gemini 3.7 Flash",
 				provider: "Google",
 				reasoning: { state: "unknown" },
+				variant: {
+					familyId: "gemini-3.7-flash",
+					familyLabel: "Gemini 3.7 Flash",
+					effort: "high",
+					speed: "standard",
+					mode: "standard",
+					contextWindow: "default",
+				},
 			},
 			{
 				id: "cursor-grok-4.6-high",
 				label: "Cursor Grok 4.6",
 				provider: "xAI",
 				reasoning: { state: "unknown" },
+				variant: {
+					familyId: "cursor-grok-4.6",
+					familyLabel: "Cursor Grok 4.6",
+					effort: "high",
+					speed: "standard",
+					mode: "standard",
+					contextWindow: "default",
+				},
 			},
 			{
 				id: "composer-2.5",
 				label: "Composer 2.5",
 				provider: "Cursor",
 				reasoning: { state: "unknown" },
+				variant: {
+					familyId: "composer-2.5",
+					familyLabel: "Composer 2.5",
+					effort: "default",
+					speed: "standard",
+					mode: "standard",
+					contextWindow: "default",
+				},
 			},
 			{
 				id: "kimi-k3-max",
 				label: "Kimi K3",
 				provider: "Moonshot AI",
 				reasoning: { state: "unknown" },
+				variant: {
+					familyId: "kimi-k3",
+					familyLabel: "Kimi K3",
+					effort: "max",
+					speed: "standard",
+					mode: "standard",
+					contextWindow: "default",
+				},
 			},
 			{
 				id: "glm-5.2-max",
 				label: "GLM 5.2 Max",
 				provider: "Zhipu AI",
 				reasoning: { state: "unknown" },
+				variant: {
+					familyId: "glm-5.2",
+					familyLabel: "GLM 5.2",
+					effort: "max",
+					speed: "standard",
+					mode: "standard",
+					contextWindow: "default",
+				},
 			},
 		]);
 	});
@@ -305,8 +370,42 @@ describe("agent capabilities", () => {
 				label: "Auto (default)",
 				provider: "Recommended",
 				reasoning: { state: "unknown" },
+				variant: {
+					familyId: "auto",
+					familyLabel: "Auto",
+					effort: "default",
+					speed: "standard",
+					mode: "standard",
+					contextWindow: "default",
+				},
 			},
 		]);
+	});
+
+	test("normalizes both Cursor thinking suffix orders", () => {
+		expect(
+			parseCursorModelVariant(
+				"claude-opus-5-thinking-xhigh-fast",
+				"Opus 5 1M Extra High Thinking Fast",
+			),
+		).toEqual({
+			familyId: "claude-opus-5",
+			familyLabel: "Opus 5",
+			effort: "xhigh",
+			speed: "fast",
+			mode: "thinking",
+			contextWindow: "1m",
+		});
+		expect(
+			parseCursorModelVariant(
+				"claude-4.6-opus-high-thinking",
+				"Opus 4.6 1M Thinking",
+			),
+		).toMatchObject({
+			familyId: "claude-4.6-opus",
+			effort: "high",
+			mode: "thinking",
+		});
 	});
 
 	test("reads only account-available models from Grok's authenticated list", () => {

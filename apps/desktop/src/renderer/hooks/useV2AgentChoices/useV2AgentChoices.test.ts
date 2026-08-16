@@ -52,7 +52,7 @@ function runtimeInventory(
 	models: NonNullable<AgentChoiceCapability["inventory"]>["models"],
 ): NonNullable<AgentChoiceCapability["inventory"]> {
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		agentId,
 		presetId: "codex",
 		configRevision: 1,

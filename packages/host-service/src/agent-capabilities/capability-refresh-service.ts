@@ -9,6 +9,7 @@ import {
 import {
 	type AgentCapabilityInventory,
 	type AgentHealthStatus,
+	CAPABILITY_INVENTORY_SCHEMA_VERSION,
 	CAPABILITY_SNAPSHOT_DISPLAY_MAX_AGE_MS,
 	CapabilityInventoryValidationError,
 	displayableCapabilityInventory,
@@ -177,7 +178,7 @@ function inventoryFromLiveSnapshot(
 ): AgentCapabilityInventory | null {
 	if (live.modelSource === "none") return null;
 	return {
-		schemaVersion: 1,
+		schemaVersion: CAPABILITY_INVENTORY_SCHEMA_VERSION,
 		agentId: config.id,
 		presetId: config.presetId,
 		configRevision: config.configRevision,

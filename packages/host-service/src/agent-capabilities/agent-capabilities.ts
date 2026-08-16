@@ -14,6 +14,7 @@ import {
 import {
 	type AgentCapabilityTrait,
 	type AgentModelOption,
+	type AgentRuntimeModelVariant,
 	getAgentModelSupport,
 } from "@superset/shared/agent-models";
 import { z } from "zod";
@@ -44,6 +45,7 @@ export interface AgentCapabilityModel {
 	label: string;
 	provider?: string;
 	reasoning: AgentCapabilityTrait<AgentModelOption>;
+	variant?: AgentRuntimeModelVariant;
 }
 
 export interface AgentCapabilitySnapshot {
@@ -535,10 +537,81 @@ export function parseCursorModels(output: string): AgentCapabilityModel[] {
 			label,
 			provider: cursorModelProvider(id),
 			reasoning: { state: "unknown" },
+			variant: parseCursorModelVariant(id, label),
 		});
 	}
 
 	return models;
+}
+
+const CURSOR_EFFORT_SUFFIXES: ReadonlyArray<
+	readonly [suffix: string, effort: string]
+> = [
+	["extra-high", "xhigh"],
+	["minimal", "minimal"],
+	["medium", "medium"],
+	["xhigh", "xhigh"],
+	["high", "high"],
+	["none", "none"],
+	["low", "low"],
+	["max", "max"],
+];
+
+function cursorFamilyLabel(label: string): string {
+	const noZdr = /\(NO ZDR\)/i.test(label) ? " (NO ZDR)" : "";
+	const cleaned = label
+		.replace(/\s*\((?:NO ZDR|current|default)\)/gi, "")
+		.replace(/\b(?:Extra High|Minimal|Medium|High|Low|None|Max)\b/gi, "")
+		.replace(/\b(?:Thinking|Fast|1M)\b/gi, "")
+		.replace(/\s+/g, " ")
+		.trim();
+	return `${cleaned}${noZdr}`;
+}
+
+export function parseCursorModelVariant(
+	id: string,
+	label: string,
+): AgentRuntimeModelVariant {
+	let familyId = id;
+	let effort: string | undefined;
+	let speed: AgentRuntimeModelVariant["speed"] = "standard";
+	let mode: AgentRuntimeModelVariant["mode"] = "standard";
+	let changed = true;
+
+	while (changed) {
+		changed = false;
+		if (speed === "standard" && familyId.endsWith("-fast")) {
+			speed = "fast";
+			familyId = familyId.slice(0, -"-fast".length);
+			changed = true;
+			continue;
+		}
+		if (mode === "standard" && familyId.endsWith("-thinking")) {
+			mode = "thinking";
+			familyId = familyId.slice(0, -"-thinking".length);
+			changed = true;
+			continue;
+		}
+		if (!effort) {
+			for (const [suffix, normalized] of CURSOR_EFFORT_SUFFIXES) {
+				const token = `-${suffix}`;
+				if (!familyId.endsWith(token)) continue;
+				effort = normalized;
+				familyId = familyId.slice(0, -token.length);
+				changed = true;
+				break;
+			}
+		}
+	}
+
+	return {
+		familyId,
+		familyLabel: cursorFamilyLabel(label),
+		effort: effort ?? "default",
+		speed,
+		mode,
+		contextWindow: /\b1M\b/i.test(label) ? "1m" : "default",
+	};
 }
 
 const ANTIGRAVITY_EFFORT_ORDER = ["low", "medium", "high"] as const;

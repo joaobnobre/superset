@@ -18,6 +18,21 @@ export interface AgentModelOption {
 	provider?: string;
 }
 
+/**
+ * Structured dimensions for an exact runtime model id. Some CLIs, notably
+ * Cursor, encode launch traits into the model id instead of accepting
+ * independent flags. Keeping the exact id alongside these dimensions lets the
+ * UI present compact pickers without synthesizing unsupported combinations.
+ */
+export interface AgentRuntimeModelVariant {
+	familyId: string;
+	familyLabel: string;
+	effort: string;
+	speed: "standard" | "fast";
+	mode: "standard" | "thinking";
+	contextWindow: "default" | "1m";
+}
+
 export type AgentCapabilityTrait<TOption> =
 	| { state: "unknown" }
 	| { state: "unsupported" }
@@ -38,6 +53,8 @@ export interface AgentModelSupport {
 	 */
 	modelEnv?: string;
 	models: AgentModelOption[];
+	/** Maps previously persisted exact runtime ids to their current UI family. */
+	modelAliases?: Readonly<Record<string, string>>;
 }
 
 export interface SupersetChatModel extends AgentModelOption {
